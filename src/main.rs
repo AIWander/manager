@@ -347,6 +347,10 @@ struct Task {
     pub forked_from: Option<String>,
     #[serde(default)]
     pub continuation_of: Option<String>,
+    #[serde(default)]
+    pub child_pid: Option<u32>,
+    #[serde(default)]
+    pub watchdog_observations: Vec<String>,
 }
 
 /// Item 16: Task routing intelligence — recommends the best backend for a prompt.
@@ -451,11 +455,54 @@ impl Server {
                 if entry.path().extension().map_or(false, |e| e == "json") {
                     if let Ok(data) = std::fs::read_to_string(entry.path()) {
                         if let Ok(task) = serde_json::from_str::<Task>(&data) {
-                            // Mark previously-running tasks as failed (server restarted)
+                            // Observe — do NOT clobber Running/Queued tasks as Failed.
+                            // The child process may still be alive even though manager restarted.
                             let mut task = task;
                             if task.status == TaskStatus::Running || task.status == TaskStatus::Queued {
-                                task.status = TaskStatus::Failed;
-                                task.error = Some("Server restarted while task was running".into());
+                                let obs = format!(
+                                    "[{}] Manager restarted — task was {} at load time. Child PID: {}",
+                                    Utc::now().format("%H:%M:%S"),
+                                    task.status,
+                                    task.child_pid.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into())
+                                );
+                                task.watchdog_observations.push(obs);
+                                // Check if child PID is still alive (best-effort)
+                                let child_alive = task.child_pid.map(|pid| {
+                                    std::process::Command::new("tasklist")
+                                        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                                        .output()
+                                        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                                        .unwrap_or(false)
+                                }).unwrap_or(false);
+                                if child_alive {
+                                    let obs2 = format!(
+                                        "[{}] Child PID {} still alive — keeping task status as {}",
+                                        Utc::now().format("%H:%M:%S"),
+                                        task.child_pid.unwrap(),
+                                        task.status
+                                    );
+                                    task.watchdog_observations.push(obs2);
+                                } else if task.child_pid.is_some() {
+                                    // Child is confirmed dead with no result — now it's fair to mark failed
+                                    let obs2 = format!(
+                                        "[{}] Child PID {} is dead — marking task as failed",
+                                        Utc::now().format("%H:%M:%S"),
+                                        task.child_pid.unwrap()
+                                    );
+                                    task.watchdog_observations.push(obs2);
+                                    task.status = TaskStatus::Failed;
+                                    task.error = Some("Child process exited without reporting result (manager restarted)".into());
+                                } else {
+                                    // No child_pid stored — legacy task from before PID tracking.
+                                    // Cannot verify liveness across manager restart, mark failed.
+                                    let obs2 = format!(
+                                        "[{}] Legacy task (no child_pid stored) — cannot verify liveness across manager restart, marking failed. Restore from DB if child actually completed.",
+                                        Utc::now().format("%H:%M:%S"),
+                                    );
+                                    task.watchdog_observations.push(obs2);
+                                    task.status = TaskStatus::Failed;
+                                    task.error = Some("Legacy task without PID tracking — cannot verify liveness across manager restart".into());
+                                }
                             }
                             tasks.insert(task.id.clone(), task);
                         }
@@ -839,6 +886,8 @@ impl Server {
             parent_task_id: None,
             forked_from: None,
             continuation_of: None,
+            child_pid: None,
+            watchdog_observations: Vec::new(),
         };
 
         // Note on original task
@@ -1106,6 +1155,8 @@ fn spawn_on_complete(
         parent_task_id: None,
         forked_from: None,
         continuation_of: None,
+        child_pid: None,
+        watchdog_observations: Vec::new(),
     };
 
     info!("on_complete: spawning follow-up task {} from completed task {}", follow_up.id, parent_id);
@@ -1465,6 +1516,16 @@ async fn run_cli_task(
             return;
         }
     };
+
+    // Store child PID for lifecycle tracking
+    if let Some(pid) = child.id() {
+        let mut store = tasks.write().await;
+        if let Some(task) = store.get_mut(&task_id) {
+            task.child_pid = Some(pid);
+            Server::persist_task(task);
+        }
+        drop(store);
+    }
 
     // Take stdout/stderr handles before waiting
     let mut stdout = child.stdout.take();
@@ -1948,6 +2009,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         parent_task_id: None,
         forked_from: None,
         continuation_of: None,
+        child_pid: None,
+        watchdog_observations: Vec::new(),
     };
 
     // Store task
@@ -2326,7 +2389,9 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
         "completed_at": task.completed_at.map(|t| t.to_rfc3339()),
         "error": task.error,
         "output_preview": output_preview,
-        "warning": warning
+        "warning": warning,
+        "watchdog_observations": task.watchdog_observations,
+        "child_pid": task.child_pid
     }))
 }
 
@@ -2959,6 +3024,8 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         parent_task_id: None,
         forked_from: None,
         continuation_of: None,
+        child_pid: None,
+        watchdog_observations: Vec::new(),
     };
     rt.block_on(async { server.tasks.write().await.insert(wf_id.clone(), wf_task); });
 
@@ -4296,6 +4363,8 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         parent_task_id: Some(original_task_id.clone()),
         forked_from: None,
         continuation_of: None,
+        child_pid: None,
+        watchdog_observations: Vec::new(),
     };
 
     // Store and persist
@@ -5104,6 +5173,8 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
         parent_task_id: None,
         forked_from: None,
         continuation_of: None,
+        child_pid: None,
+        watchdog_observations: Vec::new(),
     };
     { let mut store = st.tasks.write().await; store.insert(task_id.clone(), task.clone()); }
     Server::persist_task(&task);
@@ -5360,6 +5431,268 @@ async fn start_dashboard(state: DashboardState) {
 }
 
 // ============================================================================
+// Singleton Lock + Named Pipe
+// ============================================================================
+
+const PIPE_NAME: &str = r"\\.\pipe\cpc-manager";
+
+fn lock_path() -> String {
+    format!(r"{}\manager.lock", default_data_dir())
+}
+
+/// Try to acquire exclusive lock. Returns the lock file handle on success.
+/// The lock is held as long as the file handle is open.
+fn try_acquire_lock() -> Option<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    std::fs::create_dir_all(&default_data_dir()).ok();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(lock_path())
+        .ok()?;
+
+    // Use Windows LockFileEx for exclusive non-blocking lock
+    let handle = file.as_raw_handle();
+    let result = unsafe {
+        use std::os::windows::io::RawHandle;
+        #[allow(non_snake_case)]
+        #[repr(C)]
+        struct OVERLAPPED {
+            Internal: usize,
+            InternalHigh: usize,
+            Offset: u32,
+            OffsetHigh: u32,
+            hEvent: RawHandle,
+        }
+        extern "system" {
+            fn LockFileEx(
+                hFile: RawHandle,
+                dwFlags: u32,
+                dwReserved: u32,
+                nNumberOfBytesToLockLow: u32,
+                nNumberOfBytesToLockHigh: u32,
+                lpOverlapped: *mut OVERLAPPED,
+            ) -> i32;
+        }
+        const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x02;
+        const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x01;
+        let mut ov = OVERLAPPED {
+            Internal: 0, InternalHigh: 0, Offset: 0, OffsetHigh: 0, hEvent: std::ptr::null_mut(),
+        };
+        LockFileEx(
+            handle,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0, 1, 0,
+            &mut ov,
+        )
+    };
+
+    if result != 0 {
+        // Write our PID to the lock file
+        use std::io::Write as _;
+        let mut f = &file;
+        let _ = writeln!(f, "{}", std::process::id());
+        Some(file)
+    } else {
+        None // Lock busy — another instance is primary
+    }
+}
+
+/// Run as a pipe proxy: forward stdin to the primary instance's named pipe, forward responses to stdout.
+fn run_as_proxy() -> ! {
+    use std::io::{BufRead, Write as _};
+    info!("Running as proxy — forwarding to primary manager via named pipe");
+
+    // Connect to the named pipe (retry briefly in case primary is still starting)
+    let pipe = {
+        let mut attempts = 0;
+        loop {
+            match std::fs::OpenOptions::new().read(true).write(true).open(PIPE_NAME) {
+                Ok(f) => break f,
+                Err(e) => {
+                    attempts += 1;
+                    if attempts > 10 {
+                        eprintln!("Failed to connect to primary manager pipe: {}", e);
+                        std::process::exit(1);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    };
+
+    let pipe_reader = std::io::BufReader::new(pipe.try_clone().expect("pipe clone"));
+    let mut pipe_writer = pipe.try_clone().expect("pipe clone write");
+
+    // Spawn thread to read pipe responses and write to stdout
+    let stdout_thread = std::thread::spawn(move || {
+        let mut stdout = io::stdout();
+        for line in pipe_reader.lines() {
+            match line {
+                Ok(l) => {
+                    let _ = writeln!(stdout, "{}", l);
+                    let _ = stdout.flush();
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Read stdin and forward to pipe
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        match line {
+            Ok(l) => {
+                if let Err(_) = writeln!(pipe_writer, "{}", l) {
+                    break; // Pipe broken
+                }
+                let _ = pipe_writer.flush();
+            }
+            Err(_) => break,
+        }
+    }
+
+    // stdin closed — we're done
+    drop(pipe_writer);
+    let _ = stdout_thread.join();
+    std::process::exit(0);
+}
+
+/// Start named pipe server — accepts connections from proxy instances.
+/// Each connection gets its own handler thread that processes JSON-RPC requests.
+fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_config: Arc<RwLock<ServerConfig>>, runtime_handle: tokio::runtime::Handle) {
+    std::thread::spawn(move || {
+        use std::os::windows::io::FromRawHandle;
+        info!("Named pipe server starting at {}", PIPE_NAME);
+
+        loop {
+            // Create a named pipe instance
+            let pipe_handle = unsafe {
+                extern "system" {
+                    fn CreateNamedPipeA(
+                        lpName: *const u8,
+                        dwOpenMode: u32,
+                        dwPipeMode: u32,
+                        nMaxInstances: u32,
+                        nOutBufferSize: u32,
+                        nInBufferSize: u32,
+                        nDefaultTimeOut: u32,
+                        lpSecurityAttributes: *const u8,
+                    ) -> isize;
+                    fn ConnectNamedPipe(hNamedPipe: isize, lpOverlapped: *mut u8) -> i32;
+                }
+                const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
+                const PIPE_TYPE_BYTE: u32 = 0x00000000;
+                const PIPE_READMODE_BYTE: u32 = 0x00000000;
+                const PIPE_WAIT: u32 = 0x00000000;
+                const PIPE_UNLIMITED_INSTANCES: u32 = 255;
+
+                let name = format!("{}\0", PIPE_NAME);
+                let handle = CreateNamedPipeA(
+                    name.as_ptr(),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    PIPE_UNLIMITED_INSTANCES,
+                    65536, 65536, 0,
+                    std::ptr::null(),
+                );
+                if handle == -1 {
+                    warn!("Failed to create named pipe, retrying in 5s");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    continue;
+                }
+                // Wait for a client
+                ConnectNamedPipe(handle, std::ptr::null_mut());
+                handle
+            };
+
+            // Wrap handle as a File for reading/writing
+            let pipe_file = unsafe { std::fs::File::from_raw_handle(pipe_handle as *mut std::ffi::c_void) };
+            let tasks_c = server_tasks.clone();
+            let config_c = server_config.clone();
+            let rt = runtime_handle.clone();
+
+            std::thread::spawn(move || {
+                let reader = std::io::BufReader::new(&pipe_file);
+                let mut writer = std::io::BufWriter::new(&pipe_file);
+
+                // Create a temporary Server-like handler for this pipe connection
+                let proxy_server = Server {
+                    tasks: tasks_c,
+                    config: config_c,
+                    runtime: rt,
+                    stdout: Arc::new(Mutex::new(io::stdout())), // not used for pipe responses
+                };
+
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) if !l.trim().is_empty() => l,
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    };
+
+                    let request: JsonRpcRequest = match serde_json::from_str(&line) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let err_resp = json!({
+                                "jsonrpc": "2.0", "id": null,
+                                "error": {"code": -32700, "message": format!("Parse error: {}", e)}
+                            });
+                            let _ = writeln!(writer, "{}", serde_json::to_string(&err_resp).unwrap());
+                            let _ = writer.flush();
+                            continue;
+                        }
+                    };
+
+                    let response = match request.method.as_str() {
+                        "initialize" => json!({
+                            "jsonrpc": "2.0", "id": request.id,
+                            "result": {
+                                "protocolVersion": "2024-11-05",
+                                "serverInfo": {"name": "manager", "version": "1.0.0"},
+                                "capabilities": {"tools": {}}
+                            }
+                        }),
+                        "notifications/initialized" => continue,
+                        "tools/list" => json!({
+                            "jsonrpc": "2.0", "id": request.id,
+                            "result": get_tools_list()
+                        }),
+                        "tools/call" => {
+                            let params = request.params.unwrap_or(json!({}));
+                            let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
+                            match handle_tool_call(&proxy_server, tool_name, tool_args) {
+                                Ok(result) => json!({
+                                    "jsonrpc": "2.0", "id": request.id,
+                                    "result": {
+                                        "content": [{"type": "text", "text": serde_json::to_string_pretty(&result).unwrap()}],
+                                        "isError": false
+                                    }
+                                }),
+                                Err(e) => json!({
+                                    "jsonrpc": "2.0", "id": request.id,
+                                    "result": {
+                                        "content": [{"type": "text", "text": format!("Error: {}", e)}],
+                                        "isError": true
+                                    }
+                                }),
+                            }
+                        }
+                        _ => json!({"jsonrpc": "2.0", "id": request.id, "result": {}}),
+                    };
+
+                    let _ = writeln!(writer, "{}", serde_json::to_string(&response).unwrap());
+                    let _ = writer.flush();
+                }
+                info!("Pipe client disconnected");
+            });
+        }
+    });
+}
+
+// ============================================================================
 // Main Loop
 // ============================================================================
 
@@ -5372,6 +5705,55 @@ fn main() {
 
     info!("Manager MCP v1.0 starting...");
 
+    // === Fix 3: Singleton via lock file + named pipe ===
+    // Try to acquire exclusive lock. If another instance holds it,
+    // run as a proxy that forwards MCP requests via named pipe.
+    let _lock_guard = match try_acquire_lock() {
+        Some(lock) => {
+            info!("Acquired singleton lock — running as primary instance (PID {})", std::process::id());
+            lock
+        }
+        None => {
+            info!("Lock busy — running as proxy to primary instance");
+            run_as_proxy(); // never returns
+        }
+    };
+
+    // === Fix 4: Zombie reaper ===
+    // Kill orphan manager.exe instances that aren't responding via named pipe.
+    // Only the startup manager does this, and only to stale/orphaned instances.
+    {
+        let my_pid = std::process::id();
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq manager.exe", "/FO", "CSV", "/NH"])
+            .output();
+        if let Ok(out) = output {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                // CSV format: "manager.exe","1234","Console","1","12,345 K"
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 2 {
+                    let pid_str = parts[1].trim().trim_matches('"');
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if pid != my_pid {
+                            // Try to connect to pipe — if it responds, this is a live instance (shouldn't happen since we hold the lock)
+                            let is_orphan = std::fs::OpenOptions::new()
+                                .read(true).write(true)
+                                .open(PIPE_NAME)
+                                .is_err();
+                            if is_orphan {
+                                info!("Killing orphan manager.exe PID {} (no pipe response)", pid);
+                                let _ = std::process::Command::new("taskkill")
+                                    .args(["/PID", &pid.to_string(), "/F"])
+                                    .output();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Create tokio runtime for async operations
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -5379,6 +5761,9 @@ fn main() {
         .expect("Failed to create tokio runtime");
 
     let server = Server::new(runtime.handle().clone());
+
+    // Start named pipe server for proxy instances
+    start_pipe_server(server.tasks.clone(), server.config.clone(), runtime.handle().clone());
 
     // Spawn HTTP dashboard alongside MCP stdio
     runtime.spawn(start_dashboard(DashboardState {
@@ -5550,6 +5935,8 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             parent_task_id: None,
             forked_from: None,
             continuation_of: None,
+            child_pid: None,
+            watchdog_observations: Vec::new(),
         });
     }
 
@@ -5653,6 +6040,8 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
             parent_task_id: None,
             forked_from: None,
             continuation_of: None,
+            child_pid: None,
+            watchdog_observations: Vec::new(),
         });
     }
 
