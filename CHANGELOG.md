@@ -2,6 +2,31 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.0] - 2026-04-13
+
+### Fixed
+
+- **CRITICAL: Ghost tasks no longer survive manager restart.** Previously, restarting `manager.exe` (or a second instance starting) unconditionally marked all Running/Queued tasks as Failed with the message `"Server restarted while task was running"` — even when the child process was still alive. Tasks that *actually* completed also got stuck in "Running" forever across restarts. v1.2.0 replaces the blanket clobber with per-task PID tracking and smart liveness verification on startup. Tasks with live child PIDs keep running; dead PIDs are marked Failed with a specific observation; legacy tasks (no PID) are marked Failed with `"legacy task, no child_pid"`.
+
+### Added
+
+- **`child_pid` field on task records.** CLI tasks persist the spawned child process PID to disk. This enables startup recovery to verify task liveness rather than assuming everything is dead.
+
+- **`watchdog_observations` field on task records.** Read-only telemetry array surfacing manager's observations about task state — restarts, PID liveness checks, singleton takeovers. These observations do NOT mutate task status. They only report what was seen.
+
+- **Named-pipe singleton architecture.** Multiple Claude Desktop worker processes no longer cause competing manager instances. First manager acquires an exclusive lock at `~/AppData/Local/manager-mcp/manager.lock` and binds a named pipe server at `\\.\pipe\cpc-manager`. Subsequent spawns proxy stdio through the pipe and exit when stdio closes.
+
+- **Zombie reaper on startup.** Detects stale `manager.exe` instances from previous Claude Desktop sessions and reaps them via named-pipe health check. Prevents accumulation of orphan manager processes.
+
+### Changed
+
+- **Task status transitions are now driven ONLY by child stdio results or explicit timeouts.** Previous behavior of auto-failing tasks based on "I noticed the manager restarted" has been removed entirely. Architectural principle: observation tools don't mutate state.
+
+### Architecture
+
+This release codifies the **observation-action separation**: watchdog observations are strictly read-only telemetry; only the child-exit code path or explicit cancellation can change `task.status`. This pattern should apply to any future observability features added to manager.
+
+---
 ## [1.1.1] - 2026-04-11
 
 ### Added

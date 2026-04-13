@@ -2,10 +2,46 @@
 
 Multi-vendor AI orchestration from inside any MCP client. Manager routes
 coding, reasoning, and toolchain tasks to **Claude Code**, **OpenAI Codex**,
-**Google Gemini CLI**, or **OpenAI GPT API** — based on task shape, historical
+**Google Gemini CLI**, or **OpenAI GPT API** â€” based on task shape, historical
 success rates, and explicit user choice.
 
 One MCP server. Four backends. Server-side blocking. Durable coordination.
+
+---
+
+## What's New in v1.2.0
+
+**Critical fix** for ghost tasks after manager restart, plus architectural hardening for multi-instance scenarios.
+
+### 1. Fixed: Ghost tasks no longer survive manager restart (CRITICAL)
+
+Previously, restarting ``manager.exe`` — or a second manager instance starting — unconditionally marked all Running/Queued tasks as Failed with ``"Server restarted while task was running"``. This fired even when the child process was still alive and working. Tasks that actually *completed* also got stuck in "Running" forever across restarts.
+
+v1.2.0 replaces the blanket clobber with per-task PID tracking and smart liveness verification:
+
+- CLI tasks now persist their child process PID to disk
+- On startup, manager checks each Running task's PID
+- Alive → keep Running with observation ``"child pid N confirmed alive"``
+- Dead → mark Failed with observation ``"child pid N dead on manager startup"``
+- Legacy tasks (no PID stored) → marked Failed with observation ``"legacy task, no child_pid, cannot verify across restart"``
+
+### 2. Added: Named-pipe singleton architecture
+
+Multiple Claude Desktop worker processes no longer cause competing manager instances. The first manager to start acquires an exclusive lock at ``~/AppData/Local/manager-mcp/manager.lock`` and binds a named pipe server at ``\\.\pipe\cpc-manager``. Subsequent spawns proxy stdio through the pipe and exit when stdio closes. Only one real manager processes tasks at any time; state is shared safely via the pipe.
+
+### 3. Added: Zombie reaper on startup
+
+Detects stale ``manager.exe`` instances left over from previous Claude Desktop sessions and reaps them via named-pipe health check. Prevents accumulation of 5-10 orphan manager processes across long-running sessions.
+
+### 4. Added: ``watchdog_observations`` field on task records
+
+Read-only telemetry surfacing manager's observations about task state (restarts, PID liveness checks, singleton takeovers). These observations do NOT mutate task status — they only report what was seen.
+
+**Architectural principle:** observation tools don't mutate state. Task success/failure is determined ONLY by child process stdio result or explicit timeout — never by "I noticed something was off." The previous auto-failing behavior has been removed entirely.
+
+### 5. Added: ``child_pid`` field on task records
+
+CLI tasks persist the spawned child's PID. Enables startup recovery to verify task liveness rather than assuming all Running tasks are dead.
 
 ---
 
@@ -38,8 +74,8 @@ behavior decisions. Nine values:
 | `queued` | Waiting to be picked up |
 | `cancelled` | Cancelled by user or system |
 | `paused` | Paused by user |
-| `running_long_tool` | Backend tool is mid-flight — keep waiting |
-| `stalled` | No activity beyond threshold — actually stuck |
+| `running_long_tool` | Backend tool is mid-flight â€” keep waiting |
+| `stalled` | No activity beyond threshold â€” actually stuck |
 | `idle` | Session open but no active work |
 | `running` | Normal execution in progress |
 
@@ -48,7 +84,7 @@ more expressive.
 
 ### 4. `active_tool_running` on `task_status`
 
-Boolean field — `true` when the backend's most recent step has a `"started"`
+Boolean field â€” `true` when the backend's most recent step has a `"started"`
 event with no completion event yet. A tool is mid-flight. This is what the
 stall detector reads to decide whether to skip.
 
@@ -66,25 +102,25 @@ handlers are planned for a follow-up release.
 Manager exists because of the **33-line rule**: if a task requires writing
 more than ~33 lines of code, delegate it. Claude's context window is for
 reasoning and orchestration. Coding agents have their own sandboxes and token
-budgets — let them write code.
+budgets â€” let them write code.
 
 ### Backends
 
 | Backend | Status | Best For |
 |---------|--------|----------|
-| **Claude Code** | Full support | Multi-step toolchains, iterative implementation, complex refactors — the primary backend in v1.1.1 |
+| **Claude Code** | Full support | Multi-step toolchains, iterative implementation, complex refactors â€” the primary backend in v1.2.0 |
 | **GPT** | Full support | Pure reasoning chains, structured output, classification |
-| **Codex** | Compatibility — beta | One-shot script generation. Full functionality planned for v2. |
-| **Gemini CLI** | Compatibility — beta | One-shot Q&A, large-context analysis. Full functionality planned for v2. |
+| **Codex** | Compatibility â€” beta | One-shot script generation. Full functionality planned for v2. |
+| **Gemini CLI** | Compatibility â€” beta | One-shot Q&A, large-context analysis. Full functionality planned for v2. |
 
 ### Key Capabilities
 
-- **Auto-routing** — `auto_route=true` picks the best backend per task
-- **Server-side blocking** — `task_watch` holds the connection, zero polling
-- **Project Loafs** — durable JSON coordination files that survive crashes
-- **Archive-first** — file backups before every write, `task_rollback` to restore
-- **Analytics** — `get_analytics` shows backend success rates over time
-- **Task lineage** — `task_rerun` links new tasks to originals via `parent_task_id`
+- **Auto-routing** â€” `auto_route=true` picks the best backend per task
+- **Server-side blocking** â€” `task_watch` holds the connection, zero polling
+- **Project Loafs** â€” durable JSON coordination files that survive crashes
+- **Archive-first** â€” file backups before every write, `task_rollback` to restore
+- **Analytics** â€” `get_analytics` shows backend success rates over time
+- **Task lineage** â€” `task_rerun` links new tasks to originals via `parent_task_id`
 
 ---
 
@@ -156,7 +192,7 @@ task_rerun(
 
 ```
 status = task_status(task_id="task_abc123")
-# Read status.health — not stall_detected
+# Read status.health â€” not stall_detected
 # "running_long_tool" = backend is working, keep waiting
 # "stalled" = actually stuck, consider cancelling
 ```
@@ -262,10 +298,10 @@ See `skills/manager-with-local.md` for the full reference.
 
 ## Examples
 
-- [`examples/delegate_a_coding_task.md`](examples/delegate_a_coding_task.md) — Single-task delegation walkthrough
-- [`examples/task_rerun_workflow.md`](examples/task_rerun_workflow.md) — Re-running completed tasks with modifications
-- [`examples/parallel_workflow.md`](examples/parallel_workflow.md) — DAG execution with dependency gates
-- [`examples/health_enum_interpretation.md`](examples/health_enum_interpretation.md) — Reading the health enum correctly
+- [`examples/delegate_a_coding_task.md`](examples/delegate_a_coding_task.md) â€” Single-task delegation walkthrough
+- [`examples/task_rerun_workflow.md`](examples/task_rerun_workflow.md) â€” Re-running completed tasks with modifications
+- [`examples/parallel_workflow.md`](examples/parallel_workflow.md) â€” DAG execution with dependency gates
+- [`examples/health_enum_interpretation.md`](examples/health_enum_interpretation.md) â€” Reading the health enum correctly
 
 ---
 
@@ -273,43 +309,43 @@ See `skills/manager-with-local.md` for the full reference.
 
 ### Prerequisites: log into your coding CLI first
 
-Manager delegates to coding agents by shelling out to their command-line interfaces. **You must install and log into each CLI you want manager to use, before manager can call it.** Manager does not handle authentication — it assumes the CLI is already ready.
+Manager delegates to coding agents by shelling out to their command-line interfaces. **You must install and log into each CLI you want manager to use, before manager can call it.** Manager does not handle authentication â€” it assumes the CLI is already ready.
 
-- **Claude Code** — run `claude` in PowerShell or your terminal, complete the login flow, confirm it works standalone. Requires an active Claude subscription; manager's usage counts against that subscription.
-- **OpenAI Codex CLI** *(beta support)* — install `codex`, log in, verify. Requires an active OpenAI subscription.
-- **Gemini CLI** *(beta support)* — install `gemini`, log in, verify. Requires an active Google AI subscription.
+- **Claude Code** â€” run `claude` in PowerShell or your terminal, complete the login flow, confirm it works standalone. Requires an active Claude subscription; manager's usage counts against that subscription.
+- **OpenAI Codex CLI** *(beta support)* â€” install `codex`, log in, verify. Requires an active OpenAI subscription.
+- **Gemini CLI** *(beta support)* â€” install `gemini`, log in, verify. Requires an active Google AI subscription.
 
-Each CLI must be authenticated in a real interactive terminal *before* manager's first delegation call. If you skip this step, manager's first `task_submit` will hang or fail with an auth error from the child process. This is the single most common first-run issue — check it before anything else.
+Each CLI must be authenticated in a real interactive terminal *before* manager's first delegation call. If you skip this step, manager's first `task_submit` will hang or fail with an auth error from the child process. This is the single most common first-run issue â€” check it before anything else.
 
 ## Compatible With
 
 Works with any MCP client. Common install channels:
 
-- **Claude Desktop** (the main chat app) — add to `claude_desktop_config.json`. See `claude_desktop_config.example.json` in this repo.
-- **Claude Code** — add to `~/.claude/mcp.json`, or point your `CLAUDE.md` at `skills/manager.md` to load it as a skill instead.
-- **OpenAI Codex CLI** — register via Codex's MCP config, or load the skill directly.
-- **Gemini CLI** — register via Gemini's MCP config, or load the skill directly.
+- **Claude Desktop** (the main chat app) â€” add to `claude_desktop_config.json`. See `claude_desktop_config.example.json` in this repo.
+- **Claude Code** â€” add to `~/.claude/mcp.json`, or point your `CLAUDE.md` at `skills/manager.md` to load it as a skill instead.
+- **OpenAI Codex CLI** â€” register via Codex's MCP config, or load the skill directly.
+- **Gemini CLI** â€” register via Gemini's MCP config, or load the skill directly.
 
 **Two install layouts:**
 
-1. **Local folder** — clone or download this repo, then point your client at the local directory or the extracted `.exe` binary.
-2. **Installed binary** — grab the `.exe` from the [Releases](https://github.com/josephwander-arch/manager/releases) page, place it wherever you keep your MCP binaries, then register its path in your client's config.
+1. **Local folder** â€” clone or download this repo, then point your client at the local directory or the extracted `.exe` binary.
+2. **Installed binary** â€” grab the `.exe` from the [Releases](https://github.com/josephwander-arch/manager/releases) page, place it wherever you keep your MCP binaries, then register its path in your client's config.
 
-**Also ships as a skill** — if your client supports Anthropic skill files, load `skills/manager.md` directly. Skill-only mode gives you the behavioral guidance without running the server; useful for planning, review, or read-only workflows.
+**Also ships as a skill** â€” if your client supports Anthropic skill files, load `skills/manager.md` directly. Skill-only mode gives you the behavioral guidance without running the server; useful for planning, review, or read-only workflows.
 
 ### First-run tip: enable "always-loaded tools"
 
-For the smoothest experience, enable **tools always loaded** in your Claude client settings (Claude Desktop: Settings → Tools, or equivalent in Claude Code / Codex / Gemini). This ensures Claude recognizes the tool surface on first use without needing to re-discover it every session. Most users hit friction on day one because this is off by default.
+For the smoothest experience, enable **tools always loaded** in your Claude client settings (Claude Desktop: Settings â†’ Tools, or equivalent in Claude Code / Codex / Gemini). This ensures Claude recognizes the tool surface on first use without needing to re-discover it every session. Most users hit friction on day one because this is off by default.
 
 ### Bootstrap the rest of the toolkit *(optional convenience)*
 
-`manager` is not a required install path — each of the other four MCP servers can be installed directly using the steps in Compatible With above. But if you already have `manager` running, you can skip the manual work for the rest.
+`manager` is not a required install path â€” each of the other four MCP servers can be installed directly using the steps in Compatible With above. But if you already have `manager` running, you can skip the manual work for the rest.
 
 Once `manager` is running, you can delegate the remaining four installs to a fresh Claude Code session. Ask Claude:
 
 > `task_submit with backend claude_code: install hands, local, echo, and workflow from github.com/josephwander-arch/, register them in Claude Desktop config, and verify each one started cleanly.`
 
-The delegated session handles download, placement, and config updates in its own context — you monitor via `task_status` and pick up the results when it reports `health: done`. Good for users who already have Claude Code installed and want the full stack without manual steps.
+The delegated session handles download, placement, and config updates in its own context â€” you monitor via `task_status` and pick up the results when it reports `health: done`. Good for users who already have Claude Code installed and want the full stack without manual steps.
 
 ## License
 
