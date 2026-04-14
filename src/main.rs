@@ -808,19 +808,34 @@ impl Server {
         task.steps.last().map(|s| s.status == "started").unwrap_or(false)
     }
 
-    /// Item 4: Read breadcrumb state for Gemini injection
+    /// Item 4: Read breadcrumb state for Gemini injection.
+    /// Priority: local server state (public distribution) → autonomous → None.
     fn read_breadcrumb_state() -> Option<String> {
-        let bc_dir = format!("{}\\Volumes\\.breadcrumb", 
-            std::env::var("GOOGLE_DRIVE_PATH").unwrap_or_else(|_| r"C:\My Drive".to_string()));
-        let bc_file = format!("{}\\current.json", bc_dir);
-        std::fs::read_to_string(&bc_file).ok().and_then(|s| {
-            let v: Value = serde_json::from_str(&s).ok()?;
-            let op = v.get("operation")?.as_str()?;
-            let steps: Vec<String> = v.get("steps")?.as_array()?.iter()
-                .filter_map(|s| s.as_str().map(|x| x.to_string()))
-                .collect();
-            Some(format!("[CONTEXT: Current operation: {}. Steps completed: {}]", op, steps.join(", ")))
-        })
+        // 1. Try local server state dir first (%LOCALAPPDATA%\CPC\state)
+        let local_state_dir = {
+            let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            format!(r"{}\CPC\state", local)
+        };
+        if std::path::Path::new(&local_state_dir).exists() {
+            let active_path = format!(r"{}\active_operation.json", local_state_dir);
+            if let Some(v) = std::fs::read_to_string(&active_path).ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            {
+                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let step = v.get("current_step").and_then(|s| s.as_u64()).unwrap_or(0);
+                let total = v.get("total_steps").and_then(|s| s.as_u64()).unwrap_or(0);
+                return Some(format!("[CONTEXT: Current operation: {} (step {}/{})]", name, step, total));
+            }
+            return None; // local state dir exists, no active operation
+        }
+        // 2. Fall back to autonomous breadcrumb.jsonl
+        let autonomous_data = std::env::var("AUTONOMOUS_DATA_DIR").unwrap_or_else(|_| {
+            let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            format!(r"{}\autonomous", local)
+        });
+        let bc_jsonl = format!(r"{}\logs\breadcrumb.jsonl", autonomous_data);
+        read_state_file(&bc_jsonl)
+            .map(|line| format!("[CONTEXT: Active breadcrumb: {}]", line))
     }
 
     /// Item 18: Build a retry task from a failed task. Returns the new Task to be inserted into the store.
@@ -2672,13 +2687,33 @@ fn build_status_bar(store: &HashMap<String, Task>) -> Value {
 
     let manager_line = format!("{} running, {} queued, {} unclaimed", running, queued, unclaimed);
 
-    // Query autonomous breadcrumb state
-    let autonomous_data = std::env::var("AUTONOMOUS_DATA_DIR").unwrap_or_else(|_| {
+    // Query breadcrumb state: local server first (public distribution), autonomous second
+    let local_state_dir = {
         let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        format!(r"{}\autonomous", local)
-    });
-    let breadcrumb_line = read_state_file(&format!(r"{}\logs\breadcrumb.jsonl", autonomous_data))
-        .unwrap_or_else(|| "unavailable".to_string());
+        format!(r"{}\CPC\state", local)
+    };
+    let breadcrumb_line = if std::path::Path::new(&local_state_dir).exists() {
+        let active_path = format!(r"{}\active_operation.json", local_state_dir);
+        match std::fs::read_to_string(&active_path).ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        {
+            Some(v) => {
+                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let step = v.get("current_step").and_then(|s| s.as_u64()).unwrap_or(0);
+                let total = v.get("total_steps").and_then(|s| s.as_u64()).unwrap_or(0);
+                format!("active:{} step {}/{}", name, step, total)
+            }
+            None => "none".to_string(),
+        }
+    } else {
+        // local state dir absent — fall back to autonomous path
+        let autonomous_data = std::env::var("AUTONOMOUS_DATA_DIR").unwrap_or_else(|_| {
+            let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            format!(r"{}\autonomous", local)
+        });
+        read_state_file(&format!(r"{}\logs\breadcrumb.jsonl", autonomous_data))
+            .unwrap_or_else(|| "unavailable".to_string())
+    };
 
     // Query local server state
     let loaf_line = read_active_loaf_summary();

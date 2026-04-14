@@ -2,6 +2,12 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.4] - 2026-04-14
+
+### Fixed
+
+- **status_bar and Gemini breadcrumb injection now prefer local server's breadcrumb state** at `%LOCALAPPDATA%\CPC\state\active_operation.json`, falling back to autonomous paths only if the local state directory doesn't exist. Fixes `"bc: unavailable"` for public distribution users running manager + local without autonomous installed. Priority: local → autonomous → unavailable.
+
 ## [1.2.3] - 2026-04-14
 
 ### Fixed
