@@ -4022,11 +4022,14 @@ fn handle_loaf_close(_server: &Server, params: Value) -> Result<Value, String> {
 // List Sessions + Analytics
 // ============================================================================
 
-fn handle_list_sessions(_args: Value) -> Result<Value, String> {
+fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
+    let include_stalled = args.get("include_stalled").and_then(|v| v.as_bool()).unwrap_or(false);
     let session_dir = std::path::Path::new(SESSION_DIR);
     if !session_dir.exists() {
         return Ok(json!({"sessions": [], "count": 0}));
     }
+
+    let store = server.runtime.block_on(server.tasks.read());
 
     let mut sessions = Vec::new();
     for entry in std::fs::read_dir(session_dir).map_err(|e| e.to_string())? {
@@ -4037,14 +4040,24 @@ fn handle_list_sessions(_args: Value) -> Result<Value, String> {
             if let Ok(content) = std::fs::read_to_string(&meta_path) {
                 if let Ok(meta) = serde_json::from_str::<Value>(&content) {
                     let session_id = entry.file_name().to_string_lossy().to_string();
-                    let pid = meta.get("pid").and_then(|v| v.as_u64());
-                    let alive = pid.map(|p| {
-                        std::process::Command::new("tasklist")
-                            .args(["/FI", &format!("PID eq {}", p), "/NH"])
-                            .output()
-                            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&p.to_string()))
-                            .unwrap_or(false)
-                    }).unwrap_or(false);
+
+                    // v1.2.3: Use task store for authoritative alive/pid (heartbeat updates meta.json)
+                    let (alive, pid, last_activity) = if let Some(task) = store.get(&*session_id) {
+                        let is_alive = matches!(task.status, TaskStatus::Running | TaskStatus::Queued);
+                        (is_alive, task.child_pid, task.last_activity)
+                    } else {
+                        // Fallback to meta.json fields
+                        let pid = meta.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
+                        let alive = meta.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
+                        (alive, pid, None)
+                    };
+
+                    // v1.2.3: include_stalled filter — only show stalled sessions
+                    if include_stalled {
+                        let is_stalled = alive
+                            && last_activity.map_or(true, |la| (Utc::now() - la).num_seconds() > 120);
+                        if !is_stalled { continue; }
+                    }
 
                     sessions.push(json!({
                         "session_id": session_id,
@@ -4052,7 +4065,9 @@ fn handle_list_sessions(_args: Value) -> Result<Value, String> {
                         "pid": pid,
                         "model": meta.get("model"),
                         "working_dir": meta.get("working_dir"),
-                        "started_at": meta.get("started_at"),
+                        "started_at": meta.get("created_at"),
+                        "last_heartbeat": meta.get("last_heartbeat"),
+                        "last_activity": last_activity.map(|la| la.to_rfc3339()),
                         "prompt_preview": meta.get("prompt").and_then(|v| v.as_str()).map(|s| {
                             if s.len() > 100 { format!("{}...", &s[..100]) } else { s.to_string() }
                         }),
@@ -4376,7 +4391,8 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "loaf_update" => handle_loaf_update(server, args),
         "loaf_status" => handle_loaf_status(server, args),
         "loaf_close" => handle_loaf_close(server, args),
-        "session_list" | "list_sessions" => handle_list_sessions(args),
+        "session_list" | "list_sessions" => handle_list_sessions(server, args),
+        "session_destroy" | "destroy_session" => handle_session_destroy(server, args),
         "get_analytics" => handle_get_analytics(server, args),
         "role_list" | "list_roles" => handle_role_list(args),
         "role_create" | "create_role" => handle_role_create(args),
@@ -4918,8 +4934,8 @@ fn get_tools_list() -> Value {
             }
             ,{
                 "name": "session_start",
-                "description": "Start a persistent Claude Code session. Returns session_id. Use send_to_session for follow-ups. More control than submit_task.",
-                "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Initial prompt"}, "working_dir": {"type": "string", "description": "Working directory"}, "model": {"type": "string", "description": "Model: sonnet, opus, haiku"}}, "required": ["prompt"]}
+                "description": "Start a persistent Claude Code session. Returns session_id. Use send_to_session for follow-ups. Deduplicates by fingerprint (rejects healthy duplicates, overrides stalled). Heartbeat tracks pid/alive every 30s.",
+                "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Initial prompt"}, "working_dir": {"type": "string", "description": "Working directory"}, "model": {"type": "string", "description": "Model: sonnet, opus, haiku"}, "allow_duplicate": {"type": "boolean", "description": "Skip fingerprint dedup check. Default: false."}}, "required": ["prompt"]}
             },
             {
                 "name": "session_send",
@@ -5216,10 +5232,29 @@ fn get_tools_list() -> Value {
         ,
             json!({
                 "name": "session_list",
-                "description": "List active Claude Code sessions with their status, working directory, and whether the process is still alive.",
+                "description": "List active Claude Code sessions with their status, working directory, pid, and whether the process is still alive. Heartbeat-driven pid/alive tracking.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "include_stalled": {
+                            "type": "boolean",
+                            "description": "If true, only return stalled sessions (alive with no activity for 120s+). Default: false."
+                        }
+                    }
+                }
+            }),
+            json!({
+                "name": "session_destroy",
+                "description": "Destroy a session: kill the child process tree (same as task_cancel), mark cancelled, update meta.json. Returns killed_tree: [pids].",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session ID to destroy"
+                        }
+                    },
+                    "required": ["session_id"]
                 }
             }),
             json!({
@@ -6143,15 +6178,53 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     let working_dir = args.get("working_dir").and_then(|v| v.as_str())
         .unwrap_or(r"C:\");
     let model = args.get("model").and_then(|v| v.as_str());
-    
+    let allow_duplicate = args.get("allow_duplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // v1.2.3: Fingerprint dedup for sessions (same logic as task_submit)
+    let fp = compute_task_fingerprint(&Backend::ClaudeCode, prompt, Some(working_dir));
+    if !allow_duplicate {
+        let store = server.runtime.block_on(server.tasks.read());
+        let match_task = store.values().find(|t| {
+            t.fingerprint.as_deref() == Some(fp.as_str())
+                && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
+                && t.superseded_by.is_none()
+                && t.id.starts_with("ses_")
+        });
+        if let Some(existing) = match_task {
+            let last_act = existing.last_activity.unwrap_or(existing.created_at);
+            let stale_secs = (Utc::now() - last_act).num_seconds();
+            if stale_secs <= 120 {
+                return Ok(json!({
+                    "status": "duplicate",
+                    "existing_session_id": existing.id,
+                    "message": format!("Duplicate of active session {} (last activity {}s ago). Use allow_duplicate: true to override.", existing.id, stale_secs),
+                }));
+            }
+            // Stalled — mark old superseded
+            let old_id = existing.id.clone();
+            drop(store);
+            let mut wstore = server.runtime.block_on(server.tasks.write());
+            if let Some(old_task) = wstore.get_mut(&old_id) {
+                old_task.superseded_by = Some("pending".to_string());
+                old_task.watchdog_observations.push(format!(
+                    "[{}] Stalled {}s — superseded by new session", Utc::now().format("%H:%M:%S"), stale_secs
+                ));
+                Server::persist_task(old_task);
+            }
+            drop(wstore);
+        } else {
+            drop(store);
+        }
+    }
+
     let session_id = format!("ses_{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    
+
     // Create session directory
     let session_path = format!("{}\\{}", SESSION_DIR, session_id);
     let _ = std::fs::create_dir_all(&session_path);
-    
+
     // Build args - use -p for first prompt, store session for continuation
-    let mut args = vec![
+    let mut cli_args = vec![
         "-p".to_string(), prompt.to_string(),
         "--dangerously-skip-permissions".to_string(),
         "--verbose".to_string(),
@@ -6162,18 +6235,36 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
         "--add-dir".to_string(), r"C:\rust-mcp".to_string(),
     ];
     if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m.to_string());
+        cli_args.push("--model".to_string());
+        cli_args.push(m.to_string());
     }
-    
+
     // Submit as managed task so we can track it
     let task_id = session_id.clone();
     let tasks_bg = server.tasks.clone();
     let tid = task_id.clone();
-    
+
     // Create task entry
     {
         let mut store = server.runtime.block_on(server.tasks.write());
+        // Link stalled duplicate if any
+        if !allow_duplicate {
+            let stalled_id: Option<String> = store.values()
+                .find(|t| {
+                    t.fingerprint.as_deref() == Some(fp.as_str())
+                        && t.id != task_id
+                        && t.id.starts_with("ses_")
+                        && matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
+                        && t.superseded_by.as_deref() == Some("pending")
+                })
+                .map(|t| t.id.clone());
+            if let Some(old_id) = stalled_id {
+                if let Some(old_task) = store.get_mut(&old_id) {
+                    old_task.superseded_by = Some(task_id.clone());
+                    Server::persist_task(old_task);
+                }
+            }
+        }
         store.insert(task_id.clone(), Task {
             id: task_id.clone(),
             backend: Backend::ClaudeCode,
@@ -6183,11 +6274,11 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             error: None,
             system_prompt: None,
             model: None,
-            working_dir: None,
+            working_dir: Some(working_dir.to_string()),
             created_at: chrono::Utc::now(),
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false, extraction_status: ExtractionStatus::None,
+            progress_lines: 0, steps: Vec::new(), last_activity: Some(chrono::Utc::now()), stall_detected: false, extraction_status: ExtractionStatus::None,
             trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
             on_complete: None,
             role: None,
@@ -6198,29 +6289,137 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             continuation_of: None,
             child_pid: None,
             watchdog_observations: Vec::new(),
-            fingerprint: None,
+            fingerprint: Some(fp.clone()),
             superseded_by: None,
         });
     }
 
-    server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args));
+    server.runtime.spawn(run_cli_task(tasks_bg.clone(), tid, claude_code_cmd(), cli_args));
 
-    // Save session metadata
+    // v1.2.3: Spawn session heartbeat — updates alive/pid in meta.json and task store every 30s
+    let hb_session_id = session_id.clone();
+    let hb_session_path = session_path.clone();
+    let hb_tasks = server.tasks.clone();
+    server.runtime.spawn(async move {
+        session_heartbeat(hb_session_id, hb_session_path, hb_tasks).await;
+    });
+
+    // Save session metadata (now includes prompt and pid placeholder — heartbeat fills real pid)
     let meta = serde_json::json!({
         "session_id": session_id,
         "working_dir": working_dir,
         "model": model,
-        "created_at": chrono::Utc::now().to_rfc3339()
+        "prompt": prompt,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "pid": null,
+        "alive": true,
+        "last_heartbeat": chrono::Utc::now().to_rfc3339(),
     });
     let _ = std::fs::write(
         format!("{}\\meta.json", session_path),
         serde_json::to_string_pretty(&meta).unwrap_or_default()
     );
-    
+
     Ok(json!({
         "session_id": session_id,
         "status": "running",
         "message": "Session started. Use get_status/get_output to check. Use send_to_session for follow-ups."
+    }))
+}
+
+/// v1.2.3: Session heartbeat — polls task store every 30s to sync pid/alive into meta.json.
+async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<RwLock<HashMap<String, Task>>>) {
+    let meta_file = format!("{}\\meta.json", session_path);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        let store = tasks.read().await;
+        let task = match store.get(&session_id) {
+            Some(t) => t.clone(),
+            None => break,
+        };
+        drop(store);
+
+        // Session is terminal — write final state and stop
+        if matches!(task.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled) {
+            if let Ok(content) = std::fs::read_to_string(&meta_file) {
+                if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
+                    meta["alive"] = json!(false);
+                    meta["pid"] = json!(task.child_pid);
+                    meta["last_heartbeat"] = json!(Utc::now().to_rfc3339());
+                    let _ = std::fs::write(&meta_file, serde_json::to_string_pretty(&meta).unwrap_or_default());
+                }
+            }
+            break;
+        }
+
+        // Update meta.json with current pid and alive status
+        if let Ok(content) = std::fs::read_to_string(&meta_file) {
+            if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
+                let pid = task.child_pid;
+                let alive = pid.map(|p| {
+                    std::process::Command::new("tasklist")
+                        .args(["/FI", &format!("PID eq {}", p), "/NH"])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&p.to_string()))
+                        .unwrap_or(false)
+                }).unwrap_or(false);
+                meta["pid"] = json!(pid);
+                meta["alive"] = json!(alive);
+                meta["last_heartbeat"] = json!(Utc::now().to_rfc3339());
+                let _ = std::fs::write(&meta_file, serde_json::to_string_pretty(&meta).unwrap_or_default());
+            }
+        }
+    }
+}
+
+/// v1.2.3: session_destroy — kill process tree and clean up session.
+fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String> {
+    let session_id = args.get("session_id").and_then(|v| v.as_str())
+        .ok_or("Missing 'session_id'")?;
+
+    // Kill child process tree via task store
+    let mut killed_tree = vec![];
+    {
+        let mut store = server.runtime.block_on(server.tasks.write());
+        if let Some(task) = store.get_mut(session_id) {
+            if matches!(task.status, TaskStatus::Running | TaskStatus::Queued) {
+                if let Some(root_pid) = task.child_pid {
+                    killed_tree = kill_process_tree(root_pid);
+                }
+                task.status = TaskStatus::Cancelled;
+                task.completed_at = Some(Utc::now());
+                task.error = Some("Session destroyed by user".into());
+                if !killed_tree.is_empty() {
+                    task.watchdog_observations.push(format!(
+                        "[{}] session_destroy killed process tree: {:?}", Utc::now().format("%H:%M:%S"), killed_tree
+                    ));
+                }
+                Server::persist_task(task);
+                Server::save_to_history(task);
+            }
+        }
+    }
+
+    // Update meta.json
+    let meta_file = format!("{}\\{}\\meta.json", SESSION_DIR, session_id);
+    if let Ok(content) = std::fs::read_to_string(&meta_file) {
+        if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
+            meta["alive"] = json!(false);
+            meta["destroyed_at"] = json!(Utc::now().to_rfc3339());
+            let _ = std::fs::write(&meta_file, serde_json::to_string_pretty(&meta).unwrap_or_default());
+        }
+    }
+
+    Ok(json!({
+        "session_id": session_id,
+        "status": "destroyed",
+        "killed_tree": killed_tree,
+        "message": if killed_tree.is_empty() {
+            "Session destroyed (no child process to kill).".to_string()
+        } else {
+            format!("Session destroyed. Killed {} processes.", killed_tree.len())
+        }
     }))
 }
 
