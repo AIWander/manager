@@ -18,6 +18,14 @@ All notable changes to the Manager MCP Server are documented here.
 
 - **Fingerprint dedup with stalled override.** Before queuing, computes `fingerprint = hash(backend, prompt[:200], working_dir)`. If an active task matches: reject with `{ status: "duplicate", existing_task_id }` when last activity was within 120s. If match has no activity for 120s+, allow the new submission and mark the old task `superseded_by: <new_id>` (flagged for reap). New params: `allow_duplicate: bool` on `task_submit`, `include_stalled: bool` on `task_list`. New task fields: `fingerprint`, `superseded_by`.
 
+- **`session_destroy` tool.** Kills the session's process tree (same as `task_cancel`), marks cancelled, updates `meta.json`. Returns `killed_tree: [pids]`.
+
+- **Session fingerprint dedup.** `session_start` now computes the same fingerprint as `task_submit` and rejects healthy duplicates (active within 120s). Stalled sessions are superseded. `allow_duplicate: bool` param available.
+
+- **Session heartbeat.** Async 30s loop syncs `child_pid` and `alive` from the task store into `meta.json`. `session_list` now returns authoritative `alive`/`pid`/`last_activity` fields from the task store instead of stale creation-time values. Fixes bug where `session_list` always reported `alive: false, pid: null` for live sessions.
+
+- **`include_stalled` filter on `session_list`.** Same as `task_list` — when true, only returns sessions with no activity for 120s+.
+
 - **Integration tests.** `test_kill_process_tree_spawns_and_kills` (spawns cmd/ping, kills, verifies via tasklist), `test_compute_fingerprint_deterministic`, `test_compute_fingerprint_truncates_prompt`.
 
 ---
