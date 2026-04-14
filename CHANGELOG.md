@@ -2,6 +2,25 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.3] - 2026-04-14
+
+### Fixed
+
+- **task_cancel now kills the child process tree.** Previously, cancellation only updated the task status in the database — the background child process (and any descendants it spawned) continued running. v1.2.3 uses sysinfo to walk the process tree via parent-child relationships, kills descendants bottom-up, then kills the root. Response includes `killed_tree: [pids]` and drops the "may still be running" disclaimer on success.
+
+- **Removed task_submit blocking wait and timeout enforcement.** `wait=true` previously blocked the MCP handler thread polling every 500ms — dangerous for long tasks and a deadlock vector. `timeout_secs` killed tasks that were still working. Both removed. `task_submit` now always returns immediately. `timeout_secs` parameter kept as `estimated_secs` (informational only, no enforcement). Use `task_poll` or `task_watch` instead.
+
+### Added
+
+- **`task_poll` tool.** Returns `{ completed_since: [...], still_running: [...], status_bar: {...} }`. `since` parameter defaults to 1 hour ago. Replaces the `wait=true` polling pattern with an explicit, non-blocking poll.
+
+- **`status_bar` tool.** One-line system summary: `{ manager: "N running, M queued, K unclaimed", breadcrumb: "...", loaf: "...", formatted: "one-line string" }`. Queries autonomous breadcrumb JSONL and active Project Loaf. Returns `"unavailable"` for unreachable sources — never errors.
+
+- **Fingerprint dedup with stalled override.** Before queuing, computes `fingerprint = hash(backend, prompt[:200], working_dir)`. If an active task matches: reject with `{ status: "duplicate", existing_task_id }` when last activity was within 120s. If match has no activity for 120s+, allow the new submission and mark the old task `superseded_by: <new_id>` (flagged for reap). New params: `allow_duplicate: bool` on `task_submit`, `include_stalled: bool` on `task_list`. New task fields: `fingerprint`, `superseded_by`.
+
+- **Integration tests.** `test_kill_process_tree_spawns_and_kills` (spawns cmd/ping, kills, verifies via tasklist), `test_compute_fingerprint_deterministic`, `test_compute_fingerprint_truncates_prompt`.
+
+---
 ## [1.2.0] - 2026-04-13
 
 ### Fixed
