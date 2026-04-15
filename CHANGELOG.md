@@ -2,6 +2,12 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.5] - 2026-04-15 — Track B: Per-Server Learning Loop
+
+### Added
+- **`run_analyzer` tool** — Nightly task performance analyzer. Reads `task_history.json`, computes per-backend metrics (success rate, p50/p95 duration, avg cost, retry rate), detects inflection points, and writes promotion/demotion proposals to `Volumes/inbox/` for human review. Never auto-modifies routing logic — proposals only. Scheduled via Windows Task Scheduler at 03:45 daily.
+- **`src/analyzer.rs`** — Standalone analyzer module with `BackendMetrics` struct, 7-day vs 14-day comparison windows, and inflection point detection.
+
 ## [1.2.1] - 2026-04-15 — Phase C Fix3
 
 ### Added
