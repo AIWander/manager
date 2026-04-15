@@ -440,6 +440,7 @@ struct Server {
     config: Arc<RwLock<ServerConfig>>,
     runtime: tokio::runtime::Handle,
     stdout: Arc<Mutex<io::Stdout>>,
+    notifier: Arc<dyn SessionNotifier>,
 }
 
 impl Server {
@@ -526,6 +527,7 @@ impl Server {
             })),
             runtime,
             stdout: Arc::new(Mutex::new(io::stdout())),
+            notifier: Arc::new(RealNotifier),
         }
     }
 
@@ -4861,6 +4863,85 @@ Write-Output 'winrt'
 }
 
 // ============================================================================
+// Notification infrastructure — v1.2.6
+// ============================================================================
+
+/// Core notify logic extracted from handle_notify. Returns Err on failure.
+fn do_notify(title: &str, body: &str, icon: &str, duration_ms: u64) -> Result<(), String> {
+    let display_title = match icon {
+        "warning" => format!("[Warning] {}", title),
+        "error" => format!("[Error] {}", title),
+        _ => format!("[Info] {}", title),
+    };
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+if (Get-Command New-BurntToastNotification -ErrorAction SilentlyContinue) {
+    New-BurntToastNotification -Text $env:MCP_NOTIFY_TITLE, $env:MCP_NOTIFY_BODY -Silent | Out-Null
+    return
+}
+Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
+$titleEscaped = [System.Security.SecurityElement]::Escape($env:MCP_NOTIFY_TITLE)
+$bodyEscaped = [System.Security.SecurityElement]::Escape($env:MCP_NOTIFY_BODY)
+$toastDuration = if ([int]$env:MCP_NOTIFY_DURATION_MS -gt 7000) { 'long' } else { 'short' }
+$xml = @"
+<toast duration="$toastDuration">
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$titleEscaped</text>
+      <text>$bodyEscaped</text>
+    </binding>
+  </visual>
+  <audio silent="true"/>
+</toast>
+"@
+$doc = [Windows.Data.Xml.Dom.XmlDocument]::new()
+$doc.LoadXml($xml)
+$toast = [Windows.UI.Notifications.ToastNotification]::new($doc)
+$appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+try {
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
+} catch {
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier().Show($toast)
+}
+"#;
+
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", script])
+        .env("MCP_NOTIFY_TITLE", &display_title)
+        .env("MCP_NOTIFY_BODY", body)
+        .env("MCP_NOTIFY_DURATION_MS", duration_ms.to_string());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Abstraction over the toast notification backend. Allows TestNotifier in unit tests.
+pub trait SessionNotifier: Send + Sync + 'static {
+    fn notify(&self, title: &str, body: &str) -> Result<(), String>;
+}
+
+/// Production notifier — fires real Windows toast via PowerShell.
+pub struct RealNotifier;
+
+impl SessionNotifier for RealNotifier {
+    fn notify(&self, title: &str, body: &str) -> Result<(), String> {
+        do_notify(title, body, "info", 5000)
+    }
+}
+
+// ============================================================================
 // Tools List
 // ============================================================================
 
@@ -5086,7 +5167,21 @@ fn get_tools_list() -> Value {
             ,{
                 "name": "session_start",
                 "description": "Start a persistent Claude Code session. Returns session_id. Use send_to_session for follow-ups. Deduplicates by fingerprint (rejects healthy duplicates, overrides stalled). Heartbeat tracks pid/alive every 30s.",
-                "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string", "description": "Initial prompt"}, "working_dir": {"type": "string", "description": "Working directory"}, "model": {"type": "string", "description": "Model: sonnet, opus, haiku"}, "allow_duplicate": {"type": "boolean", "description": "Skip fingerprint dedup check. Default: false."}}, "required": ["prompt"]}
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Initial prompt"},
+                        "working_dir": {"type": "string", "description": "Working directory"},
+                        "model": {"type": "string", "description": "Model: sonnet, opus, haiku"},
+                        "allow_duplicate": {"type": "boolean", "description": "Skip fingerprint dedup check. Default: false."},
+                        "notify_on_complete": {"type": "boolean", "description": "Fire a Windows toast notification when the session ends normally. Default false."},
+                        "notify_on_fail": {"type": "boolean", "description": "Fire a Windows toast notification when the session dies unexpectedly (crash, heartbeat timeout). Default false."},
+                        "notify_on_destroy": {"type": "boolean", "description": "Fire a Windows toast notification when session_destroy is called on this session. Default false."},
+                        "notify_title": {"type": "string", "description": "Custom notification title. If omitted, auto-generated from session state."},
+                        "notify_body": {"type": "string", "description": "Custom notification body. If omitted, auto-generated from session state."}
+                    },
+                    "required": ["prompt"]
+                }
             },
             {
                 "name": "session_send",
@@ -6101,6 +6196,7 @@ fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_co
                     config: config_c,
                     runtime: rt,
                     stdout: Arc::new(Mutex::new(io::stdout())), // not used for pipe responses
+                    notifier: Arc::new(RealNotifier),
                 };
 
                 for line in reader.lines() {
@@ -6361,6 +6457,12 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
         .unwrap_or(r"C:\");
     let model = args.get("model").and_then(|v| v.as_str());
     let allow_duplicate = args.get("allow_duplicate").and_then(|v| v.as_bool()).unwrap_or(false);
+    // v1.2.6: session notification flags
+    let notify_on_complete = args.get("notify_on_complete").and_then(|v| v.as_bool());
+    let notify_on_fail = args.get("notify_on_fail").and_then(|v| v.as_bool());
+    let notify_on_destroy = args.get("notify_on_destroy").and_then(|v| v.as_bool());
+    let notify_title = args.get("notify_title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let notify_body = args.get("notify_body").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // v1.2.3: Fingerprint dedup for sessions (same logic as task_submit)
     let fp = compute_task_fingerprint(&Backend::ClaudeCode, prompt, Some(working_dir));
@@ -6479,14 +6581,17 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     server.runtime.spawn(run_cli_task(tasks_bg.clone(), tid, claude_code_cmd(), cli_args));
 
     // v1.2.3: Spawn session heartbeat — updates alive/pid in meta.json and task store every 30s
+    // v1.2.6: pass notifier so heartbeat can fire toast on session completion/failure
     let hb_session_id = session_id.clone();
     let hb_session_path = session_path.clone();
     let hb_tasks = server.tasks.clone();
+    let hb_notifier = Arc::clone(&server.notifier);
     server.runtime.spawn(async move {
-        session_heartbeat(hb_session_id, hb_session_path, hb_tasks).await;
+        session_heartbeat(hb_session_id, hb_session_path, hb_tasks, hb_notifier).await;
     });
 
     // Save session metadata (now includes prompt and pid placeholder — heartbeat fills real pid)
+    // v1.2.6: persist notify flags so they survive manager restarts
     let meta = serde_json::json!({
         "session_id": session_id,
         "working_dir": working_dir,
@@ -6496,6 +6601,11 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
         "pid": null,
         "alive": true,
         "last_heartbeat": chrono::Utc::now().to_rfc3339(),
+        "notify_on_complete": notify_on_complete,
+        "notify_on_fail": notify_on_fail,
+        "notify_on_destroy": notify_on_destroy,
+        "notify_title": notify_title,
+        "notify_body": notify_body,
     });
     let _ = std::fs::write(
         format!("{}\\meta.json", session_path),
@@ -6509,8 +6619,79 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     }))
 }
 
+// ============================================================================
+// Session notification helpers — v1.2.6
+// ============================================================================
+
+#[derive(Debug, Clone, Copy)]
+enum NotifyReason { Completed, Failed, Destroyed }
+
+fn format_duration(created_at_rfc3339: Option<&str>) -> String {
+    created_at_rfc3339
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| {
+            let secs = (Utc::now() - dt.with_timezone(&Utc)).num_seconds().max(0);
+            if secs < 60 { format!("{}s", secs) }
+            else if secs < 3600 { format!("{}m {}s", secs / 60, secs % 60) }
+            else { format!("{}h {}m", secs / 3600, (secs % 3600) / 60) }
+        })
+        .unwrap_or_else(|| "unknown duration".to_string())
+}
+
+fn fire_notify_for_session(
+    session_id: &str,
+    created_at: Option<&str>,
+    notify_title_override: Option<&str>,
+    notify_body_override: Option<&str>,
+    reason: NotifyReason,
+    notifier: &dyn SessionNotifier,
+) {
+    let duration = format_duration(created_at);
+    let (default_title, default_body) = match reason {
+        NotifyReason::Completed => (
+            "Session complete".to_string(),
+            format!("{} finished in {}", session_id, duration),
+        ),
+        NotifyReason::Failed => (
+            "Session failed".to_string(),
+            format!("{} died unexpectedly after {}", session_id, duration),
+        ),
+        NotifyReason::Destroyed => (
+            "Session destroyed".to_string(),
+            format!("{} was manually destroyed", session_id),
+        ),
+    };
+    let title = notify_title_override.unwrap_or(&default_title);
+    let body = notify_body_override.unwrap_or(&default_body);
+    if let Err(e) = notifier.notify(title, body) {
+        eprintln!("[manager] notify failed for session {}: {}", session_id, e);
+    }
+}
+
+/// Check meta flags and fire notify as appropriate. Extracted for unit-testability.
+fn check_and_fire_session_notify(
+    session_id: &str,
+    meta: &Value,
+    task_status: &TaskStatus,
+    notifier: &dyn SessionNotifier,
+) {
+    let exit_was_normal = matches!(task_status, TaskStatus::Done);
+    let notify_complete = meta.get("notify_on_complete").and_then(|v| v.as_bool()).unwrap_or(false);
+    let notify_fail = meta.get("notify_on_fail").and_then(|v| v.as_bool()).unwrap_or(false);
+    let created_at = meta.get("created_at").and_then(|v| v.as_str());
+    let title_ov = meta.get("notify_title").and_then(|v| v.as_str());
+    let body_ov = meta.get("notify_body").and_then(|v| v.as_str());
+
+    if notify_complete && exit_was_normal {
+        fire_notify_for_session(session_id, created_at, title_ov, body_ov, NotifyReason::Completed, notifier);
+    }
+    if notify_fail && !exit_was_normal {
+        fire_notify_for_session(session_id, created_at, title_ov, body_ov, NotifyReason::Failed, notifier);
+    }
+}
+
 /// v1.2.3: Session heartbeat — polls task store every 30s to sync pid/alive into meta.json.
-async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<RwLock<HashMap<String, Task>>>) {
+async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<RwLock<HashMap<String, Task>>>, notifier: Arc<dyn SessionNotifier>) {
     let meta_file = format!("{}\\meta.json", session_path);
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -6522,10 +6703,12 @@ async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<
         };
         drop(store);
 
-        // Session is terminal — write final state and stop
+        // Session is terminal — write final state, fire notify if requested, and stop
         if matches!(task.status, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled) {
             if let Ok(content) = std::fs::read_to_string(&meta_file) {
                 if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
+                    // v1.2.6: fire toast before writing final state (while meta still has notify flags)
+                    check_and_fire_session_notify(&session_id, &meta, &task.status, notifier.as_ref());
                     meta["alive"] = json!(false);
                     meta["pid"] = json!(task.child_pid);
                     meta["last_heartbeat"] = json!(Utc::now().to_rfc3339());
@@ -6559,6 +6742,23 @@ async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<
 fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String> {
     let session_id = args.get("session_id").and_then(|v| v.as_str())
         .ok_or("Missing 'session_id'")?;
+
+    // v1.2.6: fire notify_on_destroy before killing, so the toast has time to show
+    let meta_file = format!("{}\\{}\\meta.json", SESSION_DIR, session_id);
+    if let Ok(content) = std::fs::read_to_string(&meta_file) {
+        if let Ok(meta) = serde_json::from_str::<Value>(&content) {
+            if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
+                fire_notify_for_session(
+                    session_id,
+                    meta.get("created_at").and_then(|v| v.as_str()),
+                    meta.get("notify_title").and_then(|v| v.as_str()),
+                    meta.get("notify_body").and_then(|v| v.as_str()),
+                    NotifyReason::Destroyed,
+                    server.notifier.as_ref(),
+                );
+            }
+        }
+    }
 
     // Kill child process tree via task store
     let mut killed_tree = vec![];
@@ -6864,6 +7064,152 @@ fn handle_codex_review(args: Value) -> Result<Value, String> {
         "stderr": if stderr.is_empty() { None } else { Some(stderr.trim().to_string()) },
         "exit_code": output.status.code()
     }))
+}
+
+// ============================================================================
+// Tests — v1.2.6 session notification hooks
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// In-memory notifier for unit tests — records calls, never fires real toasts.
+    struct TestNotifier {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl TestNotifier {
+        fn new() -> Self { TestNotifier { calls: Mutex::new(Vec::new()) } }
+        fn recorded(&self) -> Vec<(String, String)> { self.calls.lock().unwrap().clone() }
+    }
+
+    impl SessionNotifier for TestNotifier {
+        fn notify(&self, title: &str, body: &str) -> Result<(), String> {
+            self.calls.lock().unwrap().push((title.to_string(), body.to_string()));
+            Ok(())
+        }
+    }
+
+    fn make_meta(flags: serde_json::Value) -> Value {
+        let mut base = json!({
+            "session_id": "ses_test01",
+            "created_at": "2026-04-15T10:00:00Z",
+            "notify_on_complete": null,
+            "notify_on_fail": null,
+            "notify_on_destroy": null,
+            "notify_title": null,
+            "notify_body": null,
+        });
+        if let (Value::Object(ref mut b), Value::Object(f)) = (&mut base, flags) {
+            for (k, v) in f { b.insert(k, v); }
+        }
+        base
+    }
+
+    #[test]
+    fn notify_on_complete_fires_on_normal_exit() {
+        let n = TestNotifier::new();
+        let meta = make_meta(json!({"notify_on_complete": true}));
+        check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Done, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("complete"), "title should contain 'complete': {:?}", calls[0].0);
+        assert!(calls[0].1.contains("ses_test01"), "body should contain session id");
+    }
+
+    #[test]
+    fn notify_on_fail_fires_on_crash() {
+        let n = TestNotifier::new();
+        let meta = make_meta(json!({"notify_on_fail": true}));
+        check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Failed, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("failed"), "title should contain 'failed': {:?}", calls[0].0);
+    }
+
+    #[test]
+    fn notify_on_destroy_fires_on_session_destroy() {
+        let n = TestNotifier::new();
+        let meta = make_meta(json!({"notify_on_destroy": true}));
+        // Simulate the notify path that handle_session_destroy takes
+        if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
+            fire_notify_for_session(
+                "ses_test01",
+                meta.get("created_at").and_then(|v| v.as_str()),
+                meta.get("notify_title").and_then(|v| v.as_str()),
+                meta.get("notify_body").and_then(|v| v.as_str()),
+                NotifyReason::Destroyed,
+                &n,
+            );
+        }
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("destroyed"), "title should contain 'destroyed': {:?}", calls[0].0);
+    }
+
+    #[test]
+    fn defaults_fire_no_notify() {
+        let n = TestNotifier::new();
+        // All flags absent (null in JSON → unwrap_or(false))
+        let meta = make_meta(json!({}));
+        check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Done, &n);
+        check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Failed, &n);
+        assert_eq!(n.recorded().len(), 0, "no flags set — no notifications expected");
+    }
+
+    #[test]
+    fn custom_title_body_overrides_defaults() {
+        let n = TestNotifier::new();
+        let meta = make_meta(json!({
+            "notify_on_complete": true,
+            "notify_title": "Custom Title",
+            "notify_body": "Custom body text"
+        }));
+        check_and_fire_session_notify("ses_test01", &meta, &TaskStatus::Done, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "Custom Title");
+        assert_eq!(calls[0].1, "Custom body text");
+    }
+
+    #[test]
+    fn notify_survives_manager_restart_via_meta_persistence() {
+        #[allow(unused_imports)] use std::io::Write;
+
+        // Write meta.json with notify flags (simulates pre-restart state on disk)
+        let tmp = std::env::temp_dir().join("manager_test_ses_restart");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let meta_path = tmp.join("meta.json");
+        let meta_content = json!({
+            "session_id": "ses_restart",
+            "created_at": "2026-04-15T10:00:00Z",
+            "notify_on_complete": true,
+            "notify_on_fail": true,
+            "notify_title": null,
+            "notify_body": null,
+        });
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta_content).unwrap()).unwrap();
+
+        // Simulate manager restart: read meta fresh from disk
+        let loaded_str = std::fs::read_to_string(&meta_path).unwrap();
+        let loaded_meta: Value = serde_json::from_str(&loaded_str).unwrap();
+
+        // Verify flags survived disk round-trip
+        assert_eq!(loaded_meta.get("notify_on_complete").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(loaded_meta.get("notify_on_fail").and_then(|v| v.as_bool()), Some(true));
+
+        // Simulate heartbeat detecting session died normally
+        let n = TestNotifier::new();
+        check_and_fire_session_notify("ses_restart", &loaded_meta, &TaskStatus::Done, &n);
+        let calls = n.recorded();
+        assert_eq!(calls.len(), 1, "notify_on_complete should fire after restart");
+        assert!(calls[0].0.contains("complete"));
+
+        // Cleanup
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 }
 
 // === FILE NAVIGATION ===

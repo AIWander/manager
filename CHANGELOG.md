@@ -2,6 +2,24 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.6] - 2026-04-15 — Session Notification Hooks
+
+### Added
+
+- **`session_start`: 5 new notification parameters** — `notify_on_complete`, `notify_on_fail`, `notify_on_destroy`, `notify_title`, `notify_body`. All default to false/null (non-breaking). Fully backwards-compatible — old callers see no change.
+
+- **Heartbeat notify hook** — when the 30-second heartbeat detects a session has entered a terminal state, it reads the notification flags from `meta.json` and fires the appropriate toast (`notify_on_complete` for `Done`, `notify_on_fail` for `Failed` or `Cancelled`).
+
+- **`session_destroy` notify hook** — fires `notify_on_destroy` toast *before* killing the process tree, so the notification has time to show.
+
+- **Meta persistence** — all 5 notify fields are written to `{SESSION_DIR}/{id}/meta.json` at session creation. Flags survive manager restarts: if manager is killed while a session runs, the restart-time heartbeat still reads the flags correctly when it later detects session death.
+
+- **`SessionNotifier` trait + `RealNotifier` / `TestNotifier`** — notification abstraction injected via `Server.notifier: Arc<dyn SessionNotifier>`. Enables unit-testing the notify paths without firing real Windows toasts.
+
+- **`do_notify()` helper** — extracted from `handle_notify` as a reusable `fn do_notify(title, body, icon, duration_ms) -> Result<(), String>`. `handle_notify` now delegates to it.
+
+- **6 unit tests** covering: normal-exit notify, crash notify, destroy notify, defaults-fire-nothing, custom title/body override, and meta persistence surviving a manager restart simulation.
+
 ## [1.2.5] - 2026-04-15 — Track B: Per-Server Learning Loop
 
 ### Added

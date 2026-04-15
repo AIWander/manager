@@ -9,6 +9,33 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
+## What's New in v1.2.6
+
+**Session notification hooks — get a Windows toast when a session completes, fails, or is destroyed.**
+
+Five new optional parameters on `session_start`:
+
+```json
+{
+  "tool": "session_start",
+  "arguments": {
+    "prompt": "Build the auth module",
+    "working_dir": "C:\\my-project",
+    "notify_on_complete": true,
+    "notify_on_fail": true,
+    "notify_on_destroy": false,
+    "notify_title": "Auth module done",
+    "notify_body": "Check C:\\my-project for results"
+  }
+}
+```
+
+All flags default to `false`. Omitting them entirely is equivalent to the old behavior — no change for existing callers.
+
+The flags are persisted to `meta.json` at session creation so they survive manager restarts. If manager is killed while a session runs, the heartbeat will still fire the correct toast when it detects the session ended.
+
+---
+
 ## What's New in v1.2.1
 
 **Notify tool and watchdog scope fixes.**
@@ -297,7 +324,7 @@ task_watch(task_ids=["task_1", "task_2"], timeout=600)
 
 | Tool | Purpose |
 |------|---------|
-| `session_start` | Start a persistent multi-turn session (fingerprint dedup, heartbeat) |
+| `session_start` | Start a persistent multi-turn session (fingerprint dedup, heartbeat, notify hooks) |
 | `session_send` | Send a message to an active session |
 | `session_list` | List active sessions with live alive/pid fields |
 | `session_destroy` | Kill session process tree and mark cancelled (new v1.2.3) |
