@@ -46,3 +46,52 @@ A single-binary helper that automates this entire per-machine setup is planned. 
 - Generate a `claude_desktop_config.json` snippet ready to paste
 
 Until cpc-setup.exe ships, follow the manual steps above.
+
+## Two-Tier Storage
+
+Manager writes data to exactly two places. Knowing which is which prevents accidental Drive-sync corruption and makes multi-machine setups straightforward.
+
+**TL;DR: cross-machine data goes on Volumes (Drive-syncable); machine-bound data goes in local storage (never sync).**
+
+### Tier 1 — Volumes (cross-machine, Drive-syncable)
+
+Resolved by `cpc_paths::volumes_path()`. Default: `C:\My Drive\Volumes\` on Windows.
+Override: `CPC_VOLUMES_PATH` env var.
+
+| What | Why it lives here |
+|---|---|
+| Knowledge base (Operating files, CATALOG, skills) | Write-once or write-rarely; no file locks; meaningful across machines |
+| Breadcrumb archive (`breadcrumbs/completed/`) | Completed breadcrumbs are write-once; safe to sync |
+| Handoffs, transcripts, shared reference patterns | Pure data; read from any machine |
+
+### Tier 2 — Local data (per-machine, never sync)
+
+Resolved by `cpc_paths::data_path("manager")`. Default: `%LOCALAPPDATA%\CPC\data\manager-data\` on Windows.
+Override: `CPC_MANAGER_DATA_DIR` env var.
+
+| What | Why it lives here |
+|---|---|
+| Session `meta.json` (PIDs, alive flags, heartbeats) | PIDs are machine-specific; would mislead on other machines |
+| Active breadcrumb state (`active.index.json`) | File-locked during writes; concurrent cloud sync corrupts |
+| Task store (`.json` per task) | References local process state |
+| Logs | High churn; machine context only |
+
+### What NOT to sync
+
+- **Session directories** (`meta.json`, heartbeat files) — reference local PIDs; dead on any other machine.
+- **Active breadcrumb state** (`active.index.json`, `projects/*.jsonl`) — flock-sensitive; cloud sync will corrupt if two machines write simultaneously.
+- **Chrome debug profiles** (hands server) — Chrome holds a file lock on the profile directory while running; syncing a live profile will corrupt it.
+- **Build artifacts** (`target/`) — architecture-specific binaries; never sync.
+
+### Legacy paths
+
+If you already have data at `C:\CPC\` (Joe-style install), it keeps working. Manager's legacy-fallback logic checks `C:\temp\manager-sessions\` first; if it contains session data it stays there. New installs use the cpc-paths default (`%LOCALAPPDATA%\CPC\data\manager-data\`). No migration needed.
+
+### Setting up a second machine
+
+1. Verify Google Drive is syncing `Volumes/` on the new machine.
+2. Install `manager.exe` (right arch) to `C:\CPC\servers\` or your preferred install path.
+3. Add the manager entry to `claude_desktop_config.json` (see checklist above).
+4. Log into each backend CLI interactively (Codex, Gemini, Claude Code).
+5. Re-enter credentials per machine — credentials are OS-keyring-bound and do not sync.
+6. Active session state starts fresh on the new machine. Previous sessions from your other machine are not visible here (expected — they reference that machine's processes).

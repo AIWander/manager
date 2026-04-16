@@ -2,6 +2,22 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.2.7] - 2026-04-15
+
+### Added
+
+- **`status_bar` multi-breadcrumb format.** When multiple breadcrumbs are active, `status_bar` now shows count + per-project breakdown: `"3 active (batch1: 2, other: 1)"`. Single breadcrumb keeps existing `"active:<name>"` format. Reads from `C:\CPC\state\breadcrumbs\active.index.json` (written by local/autonomous servers); falls back through legacy `active_operation.json` → autonomous JSONL for older installs.
+
+- **Session `orphaned` status.** When manager restarts and finds a session whose child process is still alive (pipes lost on restart), it now marks the session `orphaned` instead of keeping it `running`. `session_list` surfaces `"orphaned": true` for these entries. Orphaned sessions can be destroyed and restarted to recover.
+
+- **`license = "Apache-2.0"` in Cargo.toml** — matches the LICENSE file (was missing the metadata field).
+
+- **Two-Tier Storage docs** — `docs/per_machine_setup.md` now includes a Two-Tier Storage section explaining what belongs on Volumes vs local data, the do-not-sync rules, legacy path compatibility, and cross-machine setup.
+
+### Changed
+
+- `handle_list_sessions` response now includes `"orphaned": bool` field (always present, non-breaking).
+
 ## [Unreleased]
 
 ### Changed

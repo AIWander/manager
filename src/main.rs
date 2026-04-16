@@ -4,7 +4,7 @@
 //! Submit Ã¢â€ â€™ Poll Ã¢â€ â€™ Retrieve pattern for long-running tasks
 //!
 //! Tools: submit_task, get_status, get_output, list_tasks, cancel_task, configure, retry_task
-// NAV: TOC at line 6755 | 107 fn | 16 struct | 2026-04-14
+// NAV: TOC at line 7269 | 124 fn | 18 struct | 2026-04-15
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -221,6 +221,10 @@ enum TaskStatus {
     Failed,
     Cancelled,
     Paused,
+    /// v1.2.7: Session child process is still alive after manager restart but
+    /// stdout/stderr pipes were lost — session is unmonitored and cannot receive output.
+    /// Surface in session_list; user can destroy and restart.
+    Orphaned,
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -232,6 +236,7 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Failed => write!(f, "failed"),
             TaskStatus::Cancelled => write!(f, "cancelled"),
             TaskStatus::Paused => write!(f, "paused"),
+            TaskStatus::Orphaned => write!(f, "orphaned"),
         }
     }
 }
@@ -466,6 +471,7 @@ impl Server {
                             // The child process may still be alive even though manager restarted.
                             let mut task = task;
                             if task.status == TaskStatus::Running || task.status == TaskStatus::Queued {
+                                let is_session = task.id.starts_with("ses_");
                                 let obs = format!(
                                     "[{}] Manager restarted — task was {} at load time. Child PID: {}",
                                     Utc::now().format("%H:%M:%S"),
@@ -482,13 +488,27 @@ impl Server {
                                         .unwrap_or(false)
                                 }).unwrap_or(false);
                                 if child_alive {
-                                    let obs2 = format!(
-                                        "[{}] Child PID {} still alive — keeping task status as {}",
-                                        Utc::now().format("%H:%M:%S"),
-                                        task.child_pid.unwrap(),
-                                        task.status
-                                    );
-                                    task.watchdog_observations.push(obs2);
+                                    if is_session {
+                                        // v1.2.7: Session child still alive but stdout/stderr pipes were
+                                        // lost when manager restarted. Cannot re-attach OS pipes after
+                                        // the fact — mark orphaned so session_list surfaces it clearly.
+                                        // User can destroy the session and start a new one.
+                                        let obs2 = format!(
+                                            "[{}] Session child PID {} still alive but stdout/stderr pipes lost after manager restart — marking orphaned",
+                                            Utc::now().format("%H:%M:%S"),
+                                            task.child_pid.unwrap()
+                                        );
+                                        task.watchdog_observations.push(obs2);
+                                        task.status = TaskStatus::Orphaned;
+                                    } else {
+                                        let obs2 = format!(
+                                            "[{}] Child PID {} still alive — keeping task status as {}",
+                                            Utc::now().format("%H:%M:%S"),
+                                            task.child_pid.unwrap(),
+                                            task.status
+                                        );
+                                        task.watchdog_observations.push(obs2);
+                                    }
                                 } else if task.child_pid.is_some() {
                                     // Child is confirmed dead with no result — now it's fair to mark failed
                                     let obs2 = format!(
@@ -2402,6 +2422,7 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
         TaskStatus::Queued => "queued",
         TaskStatus::Cancelled => "cancelled",
         TaskStatus::Paused => "paused",
+        TaskStatus::Orphaned => "orphaned",
         TaskStatus::Running => {
             if tool_running { "running_long_tool" }
             else if stalled { "stalled" }
@@ -2691,33 +2712,9 @@ fn build_status_bar(store: &HashMap<String, Task>) -> Value {
 
     let manager_line = format!("{} running, {} queued, {} unclaimed", running, queued, unclaimed);
 
-    // Query breadcrumb state: local server first (public distribution), autonomous second
-    let local_state_dir = {
-        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        format!(r"{}\CPC\state", local)
-    };
-    let breadcrumb_line = if std::path::Path::new(&local_state_dir).exists() {
-        let active_path = format!(r"{}\active_operation.json", local_state_dir);
-        match std::fs::read_to_string(&active_path).ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        {
-            Some(v) => {
-                let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                let step = v.get("current_step").and_then(|s| s.as_u64()).unwrap_or(0);
-                let total = v.get("total_steps").and_then(|s| s.as_u64()).unwrap_or(0);
-                format!("active:{} step {}/{}", name, step, total)
-            }
-            None => "none".to_string(),
-        }
-    } else {
-        // local state dir absent — fall back to autonomous path
-        let autonomous_data = std::env::var("AUTONOMOUS_DATA_DIR").unwrap_or_else(|_| {
-            let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-            format!(r"{}\autonomous", local)
-        });
-        read_state_file(&format!(r"{}\logs\breadcrumb.jsonl", autonomous_data))
-            .unwrap_or_else(|| "unavailable".to_string())
-    };
+    // v1.2.7: Multi-breadcrumb support — read active.index.json for dashboard-aware multi-bc format.
+    // Falls back through: CPC breadcrumb index → local active_operation.json → autonomous breadcrumb.jsonl
+    let breadcrumb_line = read_breadcrumb_status_line();
 
     // Query local server state
     let loaf_line = read_active_loaf_summary();
@@ -2730,6 +2727,77 @@ fn build_status_bar(store: &HashMap<String, Task>) -> Value {
         "loaf": loaf_line,
         "formatted": formatted,
     })
+}
+
+/// v1.2.7: Read breadcrumb status line with multi-bc support.
+/// Priority: CPC active.index.json (multi-bc) → LOCALAPPDATA active_operation.json → autonomous JSONL.
+/// - 0 active: "none"
+/// - 1 active: "active:<short_name>" (same as before)
+/// - 2+ active: "N active (project_a: 2, project_b: 1)"
+fn read_breadcrumb_status_line() -> String {
+    let cpc_state = std::env::var("CPC_STATE_DIR").unwrap_or_else(|_| r"C:\CPC\state".to_string());
+    read_breadcrumb_status_line_from(&cpc_state)
+}
+
+/// Inner implementation — takes explicit cpc_state path so tests can inject a tempdir
+/// without touching process-wide env vars (which are not safe to share between parallel tests).
+fn read_breadcrumb_status_line_from(cpc_state: &str) -> String {
+    // Tier 1: <cpc_state>\breadcrumbs\active.index.json — written by local/autonomous servers
+    let index_path = format!(r"{}\breadcrumbs\active.index.json", cpc_state);
+    if let Ok(content) = std::fs::read_to_string(&index_path) {
+        if let Ok(index) = serde_json::from_str::<Value>(&content) {
+            if let Some(obj) = index.as_object() {
+                return if obj.is_empty() {
+                    "none".to_string()
+                } else if obj.len() == 1 {
+                    let (_, bc) = obj.iter().next().unwrap();
+                    let name = bc.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                    format!("active:{}", safe_truncate(name, 40))
+                } else {
+                    // Group by project_id for compact display
+                    let mut by_project: HashMap<String, usize> = HashMap::new();
+                    for (_, bc) in obj.iter() {
+                        let proj = bc.get("project_id")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("ungrouped")
+                            .to_string();
+                        *by_project.entry(proj).or_insert(0) += 1;
+                    }
+                    let mut breakdown: Vec<String> = by_project.iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect();
+                    breakdown.sort(); // stable output
+                    format!("{} active ({})", obj.len(), breakdown.join(", "))
+                };
+            }
+        }
+    }
+
+    // Tier 2: LOCALAPPDATA\CPC\state\active_operation.json (legacy single-bc format)
+    let local_state_dir = {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        format!(r"{}\CPC\state", local)
+    };
+    if std::path::Path::new(&local_state_dir).exists() {
+        let active_path = format!(r"{}\active_operation.json", local_state_dir);
+        if let Some(v) = std::fs::read_to_string(&active_path).ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        {
+            let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+            let step = v.get("current_step").and_then(|s| s.as_u64()).unwrap_or(0);
+            let total = v.get("total_steps").and_then(|s| s.as_u64()).unwrap_or(0);
+            return format!("active:{} step {}/{}", name, step, total);
+        }
+        return "none".to_string();
+    }
+
+    // Tier 3: autonomous breadcrumb.jsonl (last-resort fallback)
+    let autonomous_data = std::env::var("AUTONOMOUS_DATA_DIR").unwrap_or_else(|_| {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        format!(r"{}\autonomous", local)
+    });
+    read_state_file(&format!(r"{}\logs\breadcrumb.jsonl", autonomous_data))
+        .unwrap_or_else(|| "unavailable".to_string())
 }
 
 /// Read last line of a state file to get latest status. Returns None if file unreadable.
@@ -4081,14 +4149,16 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
                     let session_id = entry.file_name().to_string_lossy().to_string();
 
                     // v1.2.3: Use task store for authoritative alive/pid (heartbeat updates meta.json)
-                    let (alive, pid, last_activity) = if let Some(task) = store.get(&*session_id) {
+                    // v1.2.7: Also track orphaned status (child alive but pipes gone after restart)
+                    let (alive, orphaned, pid, last_activity) = if let Some(task) = store.get(&*session_id) {
                         let is_alive = matches!(task.status, TaskStatus::Running | TaskStatus::Queued);
-                        (is_alive, task.child_pid, task.last_activity)
+                        let is_orphaned = task.status == TaskStatus::Orphaned;
+                        (is_alive, is_orphaned, task.child_pid, task.last_activity)
                     } else {
                         // Fallback to meta.json fields
                         let pid = meta.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
                         let alive = meta.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
-                        (alive, pid, None)
+                        (alive, false, pid, None)
                     };
 
                     // v1.2.3: include_stalled filter — only show stalled sessions
@@ -4101,6 +4171,9 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
                     sessions.push(json!({
                         "session_id": session_id,
                         "alive": alive,
+                        // v1.2.7: orphaned=true means child PID is still running but manager lost
+                        // stdout/stderr pipes after Desktop restart. Destroy and restart to recover.
+                        "orphaned": orphaned,
                         "pid": pid,
                         "model": meta.get("model"),
                         "working_dir": meta.get("working_dir"),
@@ -7264,13 +7337,121 @@ mod tests {
             "empty dir must not be detected as legacy session data"
         );
     }
+
+    // =========================================================================
+    // Tests — v1.2.7 session stdout reconnect (orphan detection on restart)
+    // =========================================================================
+
+    /// Simulate the startup task-loading logic for a single task, returning the
+    /// final TaskStatus after the restart classification algorithm runs.
+    /// `child_alive` controls the fake PID liveness probe result.
+    fn classify_on_restart(is_session: bool, had_pid: bool, child_alive: bool) -> TaskStatus {
+        let id = if is_session { "ses_abc123".to_string() } else { "task_abc123".to_string() };
+        let child_pid: Option<u32> = if had_pid { Some(99999) } else { None };
+        let mut status = TaskStatus::Running;
+
+        // Mirror the startup logic from Server::new
+        let obs1 = format!("[TEST] Manager restarted — task was {} at load time. Child PID: {}",
+            status, child_pid.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into()));
+        let _ = obs1; // consumed for logic only
+
+        if child_alive {
+            if id.starts_with("ses_") {
+                status = TaskStatus::Orphaned;
+            }
+            // else: keep Running (non-session tasks retain status)
+        } else if child_pid.is_some() {
+            status = TaskStatus::Failed;
+        } else {
+            status = TaskStatus::Failed;
+        }
+        status
+    }
+
+    #[test]
+    fn session_alive_at_restart_becomes_orphaned() {
+        // (a) session was alive at Desktop quit, child still running at startup → orphaned
+        let result = classify_on_restart(true, true, true);
+        assert_eq!(result, TaskStatus::Orphaned,
+            "alive session after restart must be orphaned (pipes are gone)");
+    }
+
+    #[test]
+    fn session_dead_at_restart_becomes_failed() {
+        // (b) session was alive at Desktop quit, child dead at startup → failed
+        let result = classify_on_restart(true, true, false);
+        assert_eq!(result, TaskStatus::Failed,
+            "session whose child died during restart must be marked failed");
+    }
+
+    #[test]
+    fn non_session_alive_at_restart_stays_running() {
+        // Non-session task (task_) alive → stays Running (existing behavior unchanged)
+        let result = classify_on_restart(false, true, true);
+        assert_eq!(result, TaskStatus::Running,
+            "non-session tasks with alive child must stay Running");
+    }
+
+    #[test]
+    fn breadcrumb_status_line_single_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bc_dir = tmp.path().join("breadcrumbs");
+        std::fs::create_dir_all(&bc_dir).unwrap();
+        let index = json!({
+            "bc_001": {
+                "id": "bc_001",
+                "project_id": "myproject",
+                "name": "fix something | targets: foo.rs",
+                "owner": "claude"
+            }
+        });
+        std::fs::write(bc_dir.join("active.index.json"),
+            serde_json::to_string(&index).unwrap()).unwrap();
+
+        let line = read_breadcrumb_status_line_from(tmp.path().to_str().unwrap());
+
+        assert!(line.starts_with("active:"), "single bc must show active:<name>, got: {}", line);
+        assert!(line.contains("fix something"), "must include bc name, got: {}", line);
+    }
+
+    #[test]
+    fn breadcrumb_status_line_multi_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bc_dir = tmp.path().join("breadcrumbs");
+        std::fs::create_dir_all(&bc_dir).unwrap();
+        let index = json!({
+            "bc_001": {"id": "bc_001", "project_id": "proj_a", "name": "task one", "owner": "claude"},
+            "bc_002": {"id": "bc_002", "project_id": "proj_a", "name": "task two", "owner": "claude"},
+            "bc_003": {"id": "bc_003", "project_id": "proj_b", "name": "task three", "owner": "claude"}
+        });
+        std::fs::write(bc_dir.join("active.index.json"),
+            serde_json::to_string(&index).unwrap()).unwrap();
+
+        let line = read_breadcrumb_status_line_from(tmp.path().to_str().unwrap());
+
+        assert!(line.starts_with("3 active"), "3 bcs must show count, got: {}", line);
+        assert!(line.contains("proj_a: 2"), "proj_a has 2 entries, got: {}", line);
+        assert!(line.contains("proj_b: 1"), "proj_b has 1 entry, got: {}", line);
+    }
+
+    #[test]
+    fn breadcrumb_status_line_empty_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bc_dir = tmp.path().join("breadcrumbs");
+        std::fs::create_dir_all(&bc_dir).unwrap();
+        std::fs::write(bc_dir.join("active.index.json"), "{}").unwrap();
+
+        let line = read_breadcrumb_status_line_from(tmp.path().to_str().unwrap());
+
+        assert_eq!(line, "none", "empty index must return 'none', got: {}", line);
+    }
 }
 
 // === FILE NAVIGATION ===
-// Generated: 2026-04-14T22:34:54
-// Total: 6752 lines | 107 functions | 16 structs | 19 constants
+// Generated: 2026-04-15T19:55:27
+// Total: 7266 lines | 124 functions | 18 structs | 21 constants
 //
-// IMPORTS: axum, chrono, once_cell, serde, serde_json, std, sysinfo, tokio, tower_http, tracing, uuid
+// IMPORTS: axum, chrono, once_cell, serde, serde_json, std, super, sysinfo, tokio, tower_http, tracing, uuid
 //
 // CONSTANTS:
 //   const MAX_HISTORY_ENTRIES: 31
@@ -7282,16 +7463,18 @@ mod tests {
 //   static _NODE_CMD: 84
 //   static _LOAVES_ARCHIVE_DIR: 90
 //   const fn: 93
-//   const SAFETY_VALIDATION_BLOCK: 1900
-//   const PIPE_NAME: 5800
-//   const LOCKFILE_EXCLUSIVE_LOCK: 5841
-//   const LOCKFILE_FAIL_IMMEDIATELY: 5842
-//   const PIPE_ACCESS_DUPLEX: 5948
-//   const PIPE_TYPE_BYTE: 5949
-//   const PIPE_READMODE_BYTE: 5950
-//   const PIPE_WAIT: 5951
-//   const PIPE_UNLIMITED_INSTANCES: 5952
-//   const SESSION_DIR: 6240
+//   const SAFETY_VALIDATION_BLOCK: 1902
+//   const CREATE_NO_WINDOW: 4770
+//   const PIPE_NAME: 6009
+//   const LOCKFILE_EXCLUSIVE_LOCK: 6050
+//   const LOCKFILE_FAIL_IMMEDIATELY: 6051
+//   const PIPE_ACCESS_DUPLEX: 6157
+//   const PIPE_TYPE_BYTE: 6158
+//   const PIPE_READMODE_BYTE: 6159
+//   const PIPE_WAIT: 6160
+//   const PIPE_UNLIMITED_INSTANCES: 6161
+//   const LEGACY_SESSION_DIR: 6450
+//   static _SESSION_DIR: 6473
 //
 // STRUCTS:
 //   JsonRpcRequest: 162-168
@@ -7305,11 +7488,13 @@ mod tests {
 //   WorkflowTemplate: 394-412
 //   TemplateStep: 420-425
 //   ServerConfig: 431-435
-//   Server: 437-442
-//   ParallelStepResult: 3181-3188
-//   CustomRole: 4271-4276
-//   DashboardState: 5403-5406
-//   PathQuery: 5698-5700
+//   Server: 437-443
+//   ParallelStepResult: 3183-3190
+//   CustomRole: 4273-4278
+//   pub RealNotifier: 4935-4936
+//   DashboardState: 5612-5615
+//   PathQuery: 5907-5909
+//   TestNotifier: 7110-7112
 //
 // ENUMS:
 //   Backend: 196-201
@@ -7317,6 +7502,7 @@ mod tests {
 //   ExtractionStatus: 240-247
 //   TrustLevel: 255-259
 //   ValidationStatus: 267-272
+//   NotifyReason: 6658-6658
 //
 // IMPL BLOCKS:
 //   impl std::fmt::Display for Backend: 203-212
@@ -7324,7 +7510,10 @@ mod tests {
 //   impl Default for ExtractionStatus: 249-251
 //   impl Default for TrustLevel: 261-263
 //   impl Default for ValidationStatus: 274-276
-//   impl Server: 444-1089
+//   impl Server: 445-1091
+//   impl SessionNotifier for RealNotifier: 4937-4941
+//   impl TestNotifier: 7114-7117
+//   impl SessionNotifier for TestNotifier: 7119-7124
 //
 // FUNCTIONS:
 //   default_data_dir: 38-44
@@ -7341,98 +7530,115 @@ mod tests {
 //   loaves_archive_dir: 111-111
 //   spawn_visible_terminal: 124-155
 //   default_max_retries: 278-278
-//   spawn_retry_execution: 1092-1138
-//   spawn_on_complete: 1142-1195 [med]
-//   run_gpt_task: 1201-1350 [LARGE]
-//   run_codex_task: 1354-1463 [LARGE]
-//   run_cli_task: 1464-1886 [LARGE]
-//   safe_truncate: 1893-1898
-//   ensure_safety_validation: 1902-1908
-//   extract_safety_warning: 1910-1915
-//   handle_submit_task: 1917-2245 [LARGE]
-//   handle_watch_tasks: 2249-2369 [LARGE]
-//   handle_get_status: 2371-2449 [med]
-//   handle_get_output: 2451-2483
-//   handle_list_tasks: 2485-2547 [med]
-//   handle_cancel_task: 2549-2591
-//   kill_process_tree: 2595-2630
-//   handle_task_poll: 2633-2681
-//   build_status_bar: 2684-2730
-//   read_state_file: 2733-2745
-//   read_active_loaf_summary: 2748-2756
-//   compute_task_fingerprint: 2759-2768
-//   handle_status_bar: 2771-2774
-//   handle_pause_task: 2776-2796
-//   handle_resume_task: 2798-2826
-//   handle_configure: 2828-2862
-//   handle_cleanup: 2864-2892
-//   run_workflow_step: 2898-2978 [med]
-//   handle_run_workflow: 2980-3173 [LARGE]
-//   handle_run_parallel: 3190-3339 [LARGE]
-//   run_parallel_workflow: 3342-3408 [med]
-//   launch_step: 3411-3539 [LARGE]
-//   handle_decompose_task: 3545-3623 [med]
-//   handle_save_template: 3625-3647
-//   handle_list_templates: 3649-3675
-//   handle_run_template: 3677-3723
-//   handle_explain_task: 3725-3769
-//   loaf_path: 3775-3777
-//   find_active_loaf: 3780-3799
-//   handle_loaf_create: 3801-3839
-//   handle_loaf_update: 3841-3977 [LARGE]
-//   handle_loaf_status: 3979-4018
-//   handle_loaf_close: 4020-4055
-//   handle_list_sessions: 4061-4118 [med]
-//   handle_get_analytics: 4120-4196 [med]
-//   handle_run_analyzer: 4202-4209
-//   get_role_prompt: 4215-4255
-//   list_roles: 4257-4267
-//   custom_roles_dir: 4278-4282
-//   load_custom_roles: 4284-4294
-//   get_custom_role_prompt: 4296-4301
-//   handle_role_list: 4303-4318
-//   handle_role_create: 4320-4349
-//   handle_role_delete: 4351-4361
-//   save_task_artifact: 4367-4399
-//   handle_tool_call: 4405-4452
-//   handle_review_extractions: 4458-4475
-//   handle_extract_workflow: 4477-4496
-//   handle_dismiss_extraction: 4498-4506
-//   handle_rollback_task: 4508-4514
-//   handle_retry_task: 4517-4557
-//   handle_task_rerun: 4563-4744 [LARGE]
-//   handle_route_task: 4750-4760
-//   get_tools_list: 4766-5396 [LARGE]
-//   dash_status: 5408-5423
-//   dash_status_by_id: 5425-5438
-//   dash_health: 5440-5454
-//   dash_inbox: 5456-5475
-//   flush_entry: 5477-5484
-//   dash_get_prefs: 5486-5493
-//   dash_post_prefs: 5495-5504
-//   dash_post_task: 5506-5575 [med]
-//   dash_cancel: 5577-5593
-//   dash_knowledge: 5595-5621
-//   dash_git: 5623-5635
-//   dash_system: 5637-5660
-//   dash_history: 5662-5671
-//   volumes_base_path: 5673-5677
-//   validate_volumes_path: 5680-5695
-//   api_read_file: 5702-5722
-//   api_list_dir: 5724-5755
-//   start_dashboard: 5757-5794
-//   lock_path: 5802-5804
-//   try_acquire_lock: 5808-5863 [med]
-//   run_as_proxy: 5866-5923 [med]
-//   start_pipe_server: 5927-6056 [LARGE]
-//   main: 6062-6233 [LARGE]
-//   handle_start_session: 6242-6395 [LARGE]
-//   session_heartbeat: 6398-6441
-//   handle_session_destroy: 6444-6491
-//   handle_send_to_session: 6493-6590 [med]
-//   handle_open_terminal: 6592-6647 [med]
-//   handle_gemini_direct: 6649-6668
-//   handle_codex_exec: 6670-6713
-//   handle_codex_review: 6715-6752
+//   spawn_retry_execution: 1094-1140
+//   spawn_on_complete: 1144-1197 [med]
+//   run_gpt_task: 1203-1352 [LARGE]
+//   run_codex_task: 1356-1465 [LARGE]
+//   run_cli_task: 1466-1888 [LARGE]
+//   safe_truncate: 1895-1900
+//   ensure_safety_validation: 1904-1910
+//   extract_safety_warning: 1912-1917
+//   handle_submit_task: 1919-2247 [LARGE]
+//   handle_watch_tasks: 2251-2371 [LARGE]
+//   handle_get_status: 2373-2451 [med]
+//   handle_get_output: 2453-2485
+//   handle_list_tasks: 2487-2549 [med]
+//   handle_cancel_task: 2551-2593
+//   kill_process_tree: 2597-2632
+//   handle_task_poll: 2635-2683
+//   build_status_bar: 2686-2732
+//   read_state_file: 2735-2747
+//   read_active_loaf_summary: 2750-2758
+//   compute_task_fingerprint: 2761-2770
+//   handle_status_bar: 2773-2776
+//   handle_pause_task: 2778-2798
+//   handle_resume_task: 2800-2828
+//   handle_configure: 2830-2864
+//   handle_cleanup: 2866-2894
+//   run_workflow_step: 2900-2980 [med]
+//   handle_run_workflow: 2982-3175 [LARGE]
+//   handle_run_parallel: 3192-3341 [LARGE]
+//   run_parallel_workflow: 3344-3410 [med]
+//   launch_step: 3413-3541 [LARGE]
+//   handle_decompose_task: 3547-3625 [med]
+//   handle_save_template: 3627-3649
+//   handle_list_templates: 3651-3677
+//   handle_run_template: 3679-3725
+//   handle_explain_task: 3727-3771
+//   loaf_path: 3777-3779
+//   find_active_loaf: 3782-3801
+//   handle_loaf_create: 3803-3841
+//   handle_loaf_update: 3843-3979 [LARGE]
+//   handle_loaf_status: 3981-4020
+//   handle_loaf_close: 4022-4057
+//   handle_list_sessions: 4063-4120 [med]
+//   handle_get_analytics: 4122-4198 [med]
+//   handle_run_analyzer: 4204-4211
+//   get_role_prompt: 4217-4257
+//   list_roles: 4259-4269
+//   custom_roles_dir: 4280-4284
+//   load_custom_roles: 4286-4296
+//   get_custom_role_prompt: 4298-4303
+//   handle_role_list: 4305-4320
+//   handle_role_create: 4322-4351
+//   handle_role_delete: 4353-4363
+//   save_task_artifact: 4369-4401
+//   handle_tool_call: 4407-4455
+//   handle_review_extractions: 4461-4478
+//   handle_extract_workflow: 4480-4499
+//   handle_dismiss_extraction: 4501-4509
+//   handle_rollback_task: 4511-4517
+//   handle_retry_task: 4520-4560
+//   handle_task_rerun: 4566-4747 [LARGE]
+//   handle_route_task: 4753-4763
+//   handle_notify: 4772-4862 [med]
+//   do_notify: 4869-4927 [med]
+//   notify: 4931-4934
+//   get_tools_list: 4947-5605 [LARGE]
+//   dash_status: 5617-5632
+//   dash_status_by_id: 5634-5647
+//   dash_health: 5649-5663
+//   dash_inbox: 5665-5684
+//   flush_entry: 5686-5693
+//   dash_get_prefs: 5695-5702
+//   dash_post_prefs: 5704-5713
+//   dash_post_task: 5715-5784 [med]
+//   dash_cancel: 5786-5802
+//   dash_knowledge: 5804-5830
+//   dash_git: 5832-5844
+//   dash_system: 5846-5869
+//   dash_history: 5871-5880
+//   volumes_base_path: 5882-5886
+//   validate_volumes_path: 5889-5904
+//   api_read_file: 5911-5931
+//   api_list_dir: 5933-5964
+//   start_dashboard: 5966-6003
+//   lock_path: 6011-6013
+//   try_acquire_lock: 6017-6072 [med]
+//   run_as_proxy: 6075-6132 [med]
+//   start_pipe_server: 6136-6266 [LARGE]
+//   main: 6272-6443 [LARGE]
+//   has_session_data: 6453-6463
+//   session_dir: 6480-6482
+//   handle_start_session: 6484-6651 [LARGE]
+//   format_duration: 6660-6670
+//   fire_notify_for_session: 6672-6700
+//   check_and_fire_session_notify: 6703-6722
+//   session_heartbeat: 6725-6770
+//   handle_session_destroy: 6773-6837 [med]
+//   handle_send_to_session: 6839-6936 [med]
+//   handle_open_terminal: 6938-6993 [med]
+//   handle_gemini_direct: 6995-7014
+//   handle_codex_exec: 7016-7059
+//   handle_codex_review: 7061-7098
+//   make_meta: 7126-7140
+//   notify_on_complete_fires_on_normal_exit: 7143-7151
+//   notify_on_fail_fires_on_crash: 7154-7161
+//   notify_on_destroy_fires_on_session_destroy: 7164-7181
+//   defaults_fire_no_notify: 7184-7191
+//   custom_title_body_overrides_defaults: 7194-7206
+//   notify_survives_manager_restart_via_meta_persistence: 7209-7243
+//   test_session_dir_legacy_path_wins: 7246-7255
+//   test_session_dir_no_legacy_falls_through: 7258-7265
 //
 // === END FILE NAVIGATION ===
