@@ -311,6 +311,10 @@ function startPolling() {
   pollServer('voice',     `http://127.0.0.1:${ports.voice}/api/status`,     intervals.voice);
 }
 
+// Servers that include a "server" discriminator field in their /api/status response.
+// Used to detect port collisions (e.g. hands fallback grabbing port 9104 = autonomous slot).
+const SERVER_DISCRIMINATORS = { local: 'local', hands: 'hands', workflow: 'workflow' };
+
 function trackFail(name) {
   if (!state.lastSeen[name] && name in state.collapsedNeverSeen) {
     state.failCounts[name] = (state.failCounts[name] || 0) + 1;
@@ -326,12 +330,18 @@ async function pollServer(name, url, intervalMs) {
       const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
       if (r.ok) {
         const data = await r.json();
-        state.servers[name] = data;
-        state.lastSeen[name] = Date.now();
-        state.failCounts[name] = 0;
-        // If it comes online after being collapsed, un-collapse
-        if (state.collapsedNeverSeen[name]) {
-          state.collapsedNeverSeen[name] = false;
+        // Fix 4: Port-collision guard — each server with a "server" field must match.
+        // Hands falls back 9102→9107, overlapping autonomous (9104). Reject if wrong server answered.
+        const expected = SERVER_DISCRIMINATORS[name];
+        if (expected && data.server && data.server !== expected) {
+          trackFail(name); // wrong server on this port — treat as miss
+        } else {
+          state.servers[name] = data;
+          state.lastSeen[name] = Date.now();
+          state.failCounts[name] = 0;
+          if (state.collapsedNeverSeen[name]) {
+            state.collapsedNeverSeen[name] = false;
+          }
         }
       } else {
         state.servers[name] = { _error: r.status };
@@ -403,7 +413,8 @@ function renderHealthStrip() {
 
     if (data && !data._error) {
       dot.className = 'server-dot dot-online';
-      const v = data.version || '';
+      // Fix 5: check top-level version, then server_version as fallback
+      const v = data.version || data.server_version || '';
       ver.textContent = v ? ` v${v}` : '';
     } else if (seen) {
       dot.className = 'server-dot dot-warn';
@@ -571,8 +582,11 @@ function renderScorecard() {
   const done = sessions.done || 0;
   const failed = sessions.failed || 0;
   const orphaned = sessions.orphaned || 0;
-  const exeOld = ldata?.exe_old_count ?? '?';
-  const extractions = mdata?.extractions_today ?? (ldata?.extractions_today ?? '?');
+  // Fix 6: old_binaries is an array in local.health.old_binaries, not a flat count
+  const oldBins = ldata?.health?.old_binaries ?? [];
+  const exeOld = Array.isArray(oldBins) ? oldBins.length : (ldata?.exe_old_count ?? '—');
+  // Fix 6: extractions — show '—' when unavailable (autonomous not polled directly)
+  const extractions = mdata?.extractions_today ?? ldata?.extractions_today ?? '—';
 
   const items = [
     { label: 'Running', value: running, cls: running > 0 ? 'good' : '' },
@@ -645,11 +659,11 @@ function renderWorkflowPanel() {
   }
 
   const rows = [
-    ['Credentials', data.credential_count ?? data.credentials ?? '—'],
-    ['TOTP entries', data.totp_count ?? data.totp ?? '—'],
-    ['Flows', data.flow_count ?? data.flows ?? '—'],
-    ['Watches', data.watch_count ?? data.watches ?? '—'],
-    ['Last check', data.last_check || '—'],
+    ['Credentials', data.credential_count ?? data.credentials?.count ?? '—'],
+    ['TOTP entries', data.totp_count ?? data.totp?.count ?? '—'],
+    ['Flows', data.flow_count ?? data.flows?.count ?? '—'],
+    ['Watches (active)', data.watch_count ?? data.watches?.active_count ?? '—'],
+    ['Last flow', data.flows?.last_run?.name || data.last_check || '—'],
     ['Version', data.version || '—'],
   ];
   grid.innerHTML = rows.map(([l,v]) =>
