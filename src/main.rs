@@ -1,6 +1,4 @@
 #![recursion_limit = "512"]
-// TODO: fix clippy lints and remove this blanket allow
-#![allow(clippy::all)]
 //! Manager MCP Server v1.0
 //! Multi-AI orchestrator: GPT (reasoning), Gemini CLI (coding), Claude Code (coding)
 //! Submit → Poll → Retrieve pattern for long-running tasks
@@ -366,7 +364,9 @@ impl std::fmt::Display for TaskStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum ExtractionStatus {
+    #[default]
     None,
     PendingSuccess,
     PendingFailure,
@@ -375,40 +375,29 @@ enum ExtractionStatus {
     TooSimple,
 }
 
-impl Default for ExtractionStatus {
-    fn default() -> Self {
-        ExtractionStatus::None
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum TrustLevel {
+    #[default]
     Low,    // 1-3: fire and forget
     Medium, // 4-6: auto-backup before start
     High,   // 7-10: backup + require diff review
 }
 
-impl Default for TrustLevel {
-    fn default() -> Self {
-        TrustLevel::Low
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 enum ValidationStatus {
+    #[default]
     NotChecked,
     Passed,
     Failed,
     Skipped,
 }
 
-impl Default for ValidationStatus {
-    fn default() -> Self {
-        ValidationStatus::NotChecked
-    }
-}
 
 fn default_max_retries() -> u32 {
     2
@@ -656,7 +645,7 @@ impl Server {
         let mut recovery_failed_ids: Vec<String> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(tasks_dir()) {
             for entry in entries.flatten() {
-                if entry.path().extension().map_or(false, |e| e == "json") {
+                if entry.path().extension().is_some_and(|e| e == "json") {
                     if let Ok(data) = std::fs::read_to_string(entry.path()) {
                         if let Ok(task) = serde_json::from_str::<Task>(&data) {
                             // Observe — do NOT clobber Running/Queued tasks as Failed.
@@ -879,7 +868,7 @@ impl Server {
             TaskStatus::Done if task.steps.len() >= 3 => {
                 task.extraction_status = ExtractionStatus::PendingSuccess;
             }
-            TaskStatus::Failed if task.steps.len() >= 1 => {
+            TaskStatus::Failed if !task.steps.is_empty() => {
                 task.extraction_status = ExtractionStatus::PendingFailure;
             }
             _ => {
@@ -3178,7 +3167,7 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         "backend": backend.to_string(),
         "status": if visible { "visible" } else { "queued" },
         "visible": visible,
-        "message": if visible { format!("Task opened in visible terminal. Watch the terminal window.") } else { format!("Task submitted to {}. Poll with get_status.", backend) }
+        "message": if visible { "Task opened in visible terminal. Watch the terminal window.".to_string() } else { format!("Task submitted to {}. Poll with get_status.", backend) }
     });
 
     // Item 16: Include routing info when auto_route was used
@@ -3524,7 +3513,7 @@ fn handle_list_tasks(server: &Server, params: Value) -> Result<Value, String> {
             if include_stalled {
                 let is_stalled = matches!(t.status, TaskStatus::Running | TaskStatus::Queued)
                     && t.last_activity
-                        .map_or(true, |la| (Utc::now() - la).num_seconds() > 120)
+                        .is_none_or(|la| (Utc::now() - la).num_seconds() > 120)
                     && t.superseded_by.is_none();
                 if !is_stalled {
                     return false;
@@ -3690,7 +3679,7 @@ fn handle_task_poll(server: &Server, params: Value) -> Result<Value, String> {
             matches!(
                 t.status,
                 TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
-            ) && t.completed_at.map_or(false, |c| c > since)
+            ) && t.completed_at.is_some_and(|c| c > since)
         })
         .map(|t| {
             json!({
@@ -4000,7 +3989,7 @@ fn handle_cleanup(server: &Server, params: Value) -> Result<Value, String> {
     let to_remove: Vec<String> = store
         .iter()
         .filter(|(_, t)| {
-            t.completed_at.map_or(false, |c| c < cutoff)
+            t.completed_at.is_some_and(|c| c < cutoff)
                 && (t.status == TaskStatus::Done
                     || t.status == TaskStatus::Failed
                     || t.status == TaskStatus::Cancelled)
@@ -4473,7 +4462,7 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
 
     // Async: spawn workflow, return immediately with workflow_id
     let rt = server.runtime.clone();
-    let wf_id = format!("wf_{}", Uuid::new_v4().to_string()[..8].to_string());
+    let wf_id = format!("wf_{}", &Uuid::new_v4().to_string()[..8]);
 
     let wf_task = Task {
         id: wf_id.clone(),
@@ -4597,12 +4586,12 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         }
     });
 
-    return Ok(json!({
+    Ok(json!({
         "workflow_id": wf_id,
         "status": "running",
         "steps_total": steps.len(),
         "note": "Workflow running in background. Poll with get_status using workflow_id."
-    }));
+    }))
 
     // Dead code below (kept for reference, compiler may warn)
 }
@@ -4651,13 +4640,13 @@ async fn run_parallel_workflow(
             let all_deps_met = step
                 .depends_on
                 .iter()
-                .all(|dep_id| store.get(dep_id).map_or(false, |r| r.status == "done"));
+                .all(|dep_id| store.get(dep_id).is_some_and(|r| r.status == "done"));
             let any_dep_failed = step.depends_on.iter().any(|dep_id| {
                 store
                     .get(dep_id)
-                    .map_or(false, |r| r.status == "failed" || r.status == "skipped")
+                    .is_some_and(|r| r.status == "failed" || r.status == "skipped")
             });
-            let still_pending = store.get(&step.id).map_or(false, |r| r.status == "pending");
+            let still_pending = store.get(&step.id).is_some_and(|r| r.status == "pending");
             drop(store);
 
             if !still_pending {
@@ -4889,9 +4878,7 @@ fn handle_decompose_task(args: Value) -> Result<Value, String> {
                 raw_steps.push(buf.trim().to_string());
                 buf.clear();
             }
-            let content = trimmed
-                .splitn(2, |c: char| c == '.' || c == ')')
-                .nth(1)
+            let content = trimmed.split_once(['.', ')']).map(|x| x.1)
                 .unwrap_or(trimmed)
                 .trim();
             buf = content.to_string();
@@ -5207,7 +5194,7 @@ fn find_active_loaf() -> Option<(String, Value)> {
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string();
-                    if best.as_ref().map_or(true, |(_, _, bc)| created > *bc) {
+                    if best.as_ref().is_none_or(|(_, _, bc)| created > *bc) {
                         let id = v
                             .get("loaf_id")
                             .and_then(|i| i.as_str())
@@ -5714,7 +5701,7 @@ fn handle_list_sessions(server: &Server, args: Value) -> Result<Value, String> {
                     if include_stalled {
                         let is_stalled = alive
                             && last_activity
-                                .map_or(true, |la| (Utc::now() - la).num_seconds() > 120);
+                                .is_none_or(|la| (Utc::now() - la).num_seconds() > 120);
                         if !is_stalled {
                             continue;
                         }
@@ -8778,7 +8765,7 @@ fn lock_path() -> String {
 /// The lock is held as long as the file handle is open.
 fn try_acquire_lock() -> Option<std::fs::File> {
     use std::os::windows::io::AsRawHandle;
-    std::fs::create_dir_all(&default_data_dir()).ok();
+    std::fs::create_dir_all(default_data_dir()).ok();
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -8790,7 +8777,7 @@ fn try_acquire_lock() -> Option<std::fs::File> {
     let handle = file.as_raw_handle();
     let result = unsafe {
         use std::os::windows::io::RawHandle;
-        #[allow(non_snake_case)]
+        #[allow(non_snake_case, clippy::upper_case_acronyms)] // Win32 API name
         #[repr(C)]
         struct OVERLAPPED {
             Internal: usize,
@@ -8888,7 +8875,7 @@ fn run_as_proxy() -> ! {
     for line in stdin.lock().lines() {
         match line {
             Ok(l) => {
-                if let Err(_) = writeln!(pipe_writer, "{}", l) {
+                if writeln!(pipe_writer, "{}", l).is_err() {
                     break; // Pipe broken
                 }
                 let _ = pipe_writer.flush();
@@ -9179,7 +9166,7 @@ fn main() {
                 id: request.id.clone(),
                 error: JsonRpcError {
                     code: -32600,
-                    message: format!("Invalid JSON-RPC version"),
+                    message: "Invalid JSON-RPC version".to_string(),
                 },
             };
             server.write_stdout(&serde_json::to_string(&error_response).unwrap());
