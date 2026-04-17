@@ -25,6 +25,11 @@ All notable changes to the Manager MCP Server are documented here.
 ### Changed
 
 - `start_dashboard` now reads `CPC_DASHBOARD_PORT` env var (was `CPC_MANAGER_PORT`; backward-compat alias kept). Stores actual bound port in `DASHBOARD_PORT` atomic for tool introspection.
+- **`docs/dashboard.md` rewrite** — expanded from 75 to 249 lines. Now covers runtime-decoupled architecture, axum migration, Cache-Control headers, click-to-detail panel, partial-install behavior, live_status.json, MCP tools, troubleshooting, and live-editing guide.
+
+### Fixed
+
+- **UTF-8 encoding** — repaired 19 mojibake characters in `src/main.rs` (corrupted em-dashes, checkmarks, arrows restored to correct Unicode codepoints). No logic changes.
 
 ## [1.2.7] - 2026-04-15
 

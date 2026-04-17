@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 //! Manager MCP Server v1.0
 //! Multi-AI orchestrator: GPT (reasoning), Gemini CLI (coding), Claude Code (coding)
-//! Submit Ã¢â€ â€™ Poll Ã¢â€ â€™ Retrieve pattern for long-running tasks
+//! Submit → Poll → Retrieve pattern for long-running tasks
 //!
 //! Tools: submit_task, get_status, get_output, list_tasks, cancel_task, configure, retry_task
 // NAV: TOC at line 7450 | 133 fn | 18 struct | 2026-04-15
@@ -130,7 +130,7 @@ fn loaves_archive_dir() -> &'static str { &_LOAVES_ARCHIVE_DIR }
 }
 
 /// Spawn a visible terminal window mirroring a background task's CLI command.
-/// Fire-and-forget â€” errors are logged but don't affect the background task.
+/// Fire-and-forget — errors are logged but don't affect the background task.
 fn spawn_visible_terminal(title: &str, exe: &str, args: &[String], working_dir: &str) {
     // Write full command to temp .bat to avoid cmd/wt quoting hell
     let skip_args: std::collections::HashSet<&str> = ["--output-format", "stream-json"].iter().copied().collect();
@@ -800,20 +800,20 @@ impl Server {
                 // Success: last 500 chars of output as summary
                 let out = &task.output;
                 if out.len() > 500 {
-                    format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), &out[out.len()-500..])
+                    format!("✓ Task completed ({} steps)\n\n{}", task.steps.len(), &out[out.len()-500..])
                 } else {
-                    format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), out)
+                    format!("✓ Task completed ({} steps)\n\n{}", task.steps.len(), out)
                 }
             }
             TaskStatus::Failed => {
                 // Failure: step trail + error
-                let mut report = format!("âœ— Task failed after {} steps\n\n", task.steps.len());
+                let mut report = format!("✗ Task failed after {} steps\n\n", task.steps.len());
                 report.push_str("Step trail:\n");
                 for (i, step) in task.steps.iter().enumerate() {
                     let mark = match step.status.as_str() {
-                        "completed" => "âœ“",
-                        "error" => "âœ—",
-                        _ => "â†’",
+                        "completed" => "✓",
+                        "error" => "✗",
+                        _ => "→",
                     };
                     report.push_str(&format!("  {} {}. {} ({})\n", mark, i+1, step.tool, step.status));
                 }
@@ -1519,7 +1519,7 @@ async fn run_cli_task(
             .unwrap_or_else(|| r"C:\Users\josep".to_string())
     };
 
-    // Spawn process Ã¢â‚¬â€ .cmd files need cmd /C on Windows
+    // Spawn process — .cmd files need cmd /C on Windows
     let (spawn_cmd, spawn_args) = if command.ends_with(".cmd") || command.ends_with(".bat") {
         let mut all_args = vec!["/C".to_string(), command.to_string()];
         all_args.extend(args.clone());
@@ -1587,7 +1587,7 @@ async fn run_cli_task(
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
 
-    // Spawn stdout reader â€” raw byte reading, splits on both \n and \r
+    // Spawn stdout reader — raw byte reading, splits on both \n and \r
     let stdout_handle = if let Some(mut stdout) = stdout.take() {
         let tasks_c = tasks.clone();
         let tid_c = task_id.clone();
@@ -1604,7 +1604,7 @@ async fn run_cli_task(
                         for c in chunk.chars() {
                             if c == '\n' {
                                 if cr_seen {
-                                    // \r\n pair â€” \r already emitted a line
+                                    // \r\n pair — \r already emitted a line
                                     cr_seen = false;
                                     continue;
                                 }
@@ -1713,12 +1713,12 @@ async fn run_cli_task(
                                                 }
                                             }
                                             "result" => {
-                                                // Skip â€” Claude Code text already captured from assistant events
+                                                // Skip — Claude Code text already captured from assistant events
                                             }
                                             _ => {}
                                         }
                                     } else {
-                                        // Not valid JSON â€” append raw (fallback)
+                                        // Not valid JSON — append raw (fallback)
                                         if !task.output.is_empty() { task.output.push('\n'); }
                                         task.output.push_str(line);
                                         task.progress_lines += 1;
@@ -1733,7 +1733,7 @@ async fn run_cli_task(
             if !partial.is_empty() {
                 let mut store = tasks_c.write().await;
                 if let Some(task) = store.get_mut(&tid_c) {
-                    // Try JSON parse â€” extract text from assistant content array
+                    // Try JSON parse — extract text from assistant content array
                     if let Ok(ev) = serde_json::from_str::<Value>(&partial) {
                         if ev.get("type").and_then(|t| t.as_str()) == Some("assistant") {
                             if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
@@ -1760,7 +1760,7 @@ async fn run_cli_task(
         None
     };
 
-    // Spawn stderr reader â€” same byte-level splitting with [STDERR] prefix
+    // Spawn stderr reader — same byte-level splitting with [STDERR] prefix
     let stderr_handle = if let Some(mut stderr) = stderr.take() {
         let tasks_c = tasks.clone();
         let tid_c = task_id.clone();
