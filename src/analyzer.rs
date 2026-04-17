@@ -266,7 +266,7 @@ fn compute_by_task_type(tasks: &[&Value]) -> HashMap<String, HashMap<String, Bac
 
     let mut result: HashMap<String, HashMap<String, BackendMetrics>> = HashMap::new();
     for (task_type, type_tasks) in &type_map {
-        let refs: Vec<&Value> = type_tasks.iter().copied().collect();
+        let refs: Vec<&Value> = type_tasks.to_vec();
         result.insert(task_type.clone(), compute_metrics(&refs));
     }
     result
