@@ -1,4 +1,15 @@
 #![recursion_limit = "512"]
+// TODO: fix these clippy lints and remove allows
+#![allow(
+    clippy::derivable_impls,
+    clippy::iter_cloned_collect,
+    clippy::len_zero,
+    clippy::needless_return,
+    clippy::to_string_in_format_args,
+    clippy::unnecessary_map_or,
+    clippy::unnecessary_sort_by,
+    clippy::useless_format
+)]
 //! Manager MCP Server v1.0
 //! Multi-AI orchestrator: GPT (reasoning), Gemini CLI (coding), Claude Code (coding)
 //! Submit → Poll → Retrieve pattern for long-running tasks
