@@ -2,6 +2,30 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [1.3.0] - 2026-04-16
+
+### Fixed
+
+- **Stdin handling fix (StdinMode v2)** — New `StdinMode` enum (`Null` / `Piped`) controls child process stdin. One-shot tasks get `Stdio::null()` (immediate EOF), sessions get `Stdio::piped()` for `send()` follow-ups. Resolves stdin reader block that caused task startup stalls on Windows when multiple backends competed for stdio.
+
+- **Reader cleanup hardening (v2)** — Sequential `child.wait()` then 5-second timeout on reader drain. Prevents indefinite hang on Windows pipe close when child exits but stdout/stderr readers haven't finished consuming buffered data.
+
+### Added
+
+- **Stall watchdog** — `TaskStatus::Stalled` state for tasks with no output for `MANAGER_STALL_TIMEOUT_SECS`. Transitions back to `Running` automatically if output resumes. Surfaced in `task_poll` and dashboard.
+
+- **`live_activity` field** — Per-task process tree snapshot (`ActivityEntry`: pid, name, cmd_preview, cpu_percent). Enables dashboard to show what a backend is actually doing.
+
+- **`recent_tool_calls` ring buffer** — Last 50 tool calls with timestamps, session/task association, and duration. Credential-bearing tool names are redacted. Shared with dashboard via `/api/status`.
+
+- **`label` field on TaskSubmitResult** — Optional human-readable label for tasks, shown in dashboard cards and `task_list`.
+
+- **Step progress tracking** — `current_step`, `total_steps`, `current_step_desc` fields on task records. Powers breadcrumb progress bar in dashboard.
+
+- **`effort` field** — Optional effort estimate on task submission, surfaced in dashboard.
+
+- **Dashboard v1.3 patches** — Breadcrumb progress bar, voice health dot, Fix3–Fix6 consolidated (click-to-detail panel fix, 2 Hz render cap, aggregateToolCalls removal, pollServer guard for undefined intervals).
+
 ## [1.2.8] - 2026-04-15
 
 ### Added

@@ -9,7 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Read as IoRead, Write};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,16 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 mod analyzer;
+
+/// Controls whether a spawned CLI task gets piped stdin (for send() follow-ups)
+/// or null stdin (immediate EOF — prevents claude_code stdin reader stalls).
+#[derive(Clone, Copy, Debug)]
+enum StdinMode {
+    /// One-shot tasks: stdin → /dev/null. Child sees EOF immediately.
+    Null,
+    /// Sessions: stdin → piped. send() can write follow-up input.
+    Piped,
+}
 
 // Dashboard
 use axum::{extract::{Path as AxumPath, Query, State}, http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router};
@@ -130,7 +140,7 @@ fn loaves_archive_dir() -> &'static str { &_LOAVES_ARCHIVE_DIR }
 }
 
 /// Spawn a visible terminal window mirroring a background task's CLI command.
-/// Fire-and-forget — errors are logged but don't affect the background task.
+/// Fire-and-forget â€” errors are logged but don't affect the background task.
 fn spawn_visible_terminal(title: &str, exe: &str, args: &[String], working_dir: &str) {
     // Write full command to temp .bat to avoid cmd/wt quoting hell
     let skip_args: std::collections::HashSet<&str> = ["--output-format", "stream-json"].iter().copied().collect();
@@ -234,6 +244,9 @@ enum TaskStatus {
     /// stdout/stderr pipes were lost — session is unmonitored and cannot receive output.
     /// Surface in session_list; user can destroy and restart.
     Orphaned,
+    /// v1.2.9: Task is running but has produced no output for MANAGER_STALL_TIMEOUT_SECS.
+    /// Transitions back to Running automatically if output resumes.
+    Stalled,
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -246,6 +259,7 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Cancelled => write!(f, "cancelled"),
             TaskStatus::Paused => write!(f, "paused"),
             TaskStatus::Orphaned => write!(f, "orphaned"),
+            TaskStatus::Stalled => write!(f, "stalled"),
         }
     }
 }
@@ -301,6 +315,25 @@ struct TaskStep {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct ActivityEntry {
+    pid: u32,
+    name: String,
+    cmd_preview: String,
+    cpu_percent: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ToolCallEntry {
+    tool_name: String,
+    timestamp_utc: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+    duration_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Task {
     id: String,
     backend: Backend,
@@ -319,6 +352,8 @@ struct Task {
     steps: Vec<TaskStep>,
     #[serde(default)]
     last_activity: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_output_chunk_at: Option<DateTime<Utc>>,
     #[serde(default)]
     stall_detected: bool,
     #[serde(default)]
@@ -371,6 +406,18 @@ struct Task {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step_desc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_activity: Option<Vec<ActivityEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Item 16: Task routing intelligence — recommends the best backend for a prompt.
@@ -449,12 +496,16 @@ struct ServerConfig {
     default_working_dir: String,
 }
 
+type StdinPipes = Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>>>>;
+
 struct Server {
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     config: Arc<RwLock<ServerConfig>>,
     runtime: tokio::runtime::Handle,
     stdout: Arc<Mutex<io::Stdout>>,
     notifier: Arc<dyn SessionNotifier>,
+    recent_tool_calls: Arc<Mutex<VecDeque<ToolCallEntry>>>,
+    stdin_pipes: StdinPipes,
 }
 
 impl Server {
@@ -557,6 +608,8 @@ impl Server {
             runtime,
             stdout: Arc::new(Mutex::new(io::stdout())),
             notifier: Arc::new(RealNotifier),
+            recent_tool_calls: Arc::new(Mutex::new(VecDeque::new())),
+            stdin_pipes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -800,20 +853,20 @@ impl Server {
                 // Success: last 500 chars of output as summary
                 let out = &task.output;
                 if out.len() > 500 {
-                    format!("✓ Task completed ({} steps)\n\n{}", task.steps.len(), &out[out.len()-500..])
+                    format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), &out[out.len()-500..])
                 } else {
-                    format!("✓ Task completed ({} steps)\n\n{}", task.steps.len(), out)
+                    format!("âœ“ Task completed ({} steps)\n\n{}", task.steps.len(), out)
                 }
             }
             TaskStatus::Failed => {
                 // Failure: step trail + error
-                let mut report = format!("✗ Task failed after {} steps\n\n", task.steps.len());
+                let mut report = format!("âœ— Task failed after {} steps\n\n", task.steps.len());
                 report.push_str("Step trail:\n");
                 for (i, step) in task.steps.iter().enumerate() {
                     let mark = match step.status.as_str() {
-                        "completed" => "✓",
-                        "error" => "✗",
-                        _ => "→",
+                        "completed" => "âœ“",
+                        "error" => "âœ—",
+                        _ => "—",
                     };
                     report.push_str(&format!("  {} {}. {} ({})\n", mark, i+1, step.tool, step.status));
                 }
@@ -898,6 +951,13 @@ impl Server {
             task.backend.clone()
         };
 
+        // Auto-escalate effort on retry
+        let new_effort = match task.effort.as_deref() {
+            None | Some("low") | Some("medium") => Some("high".to_string()),
+            Some("high") => Some("max".to_string()),
+            Some(other) => Some(other.to_string()),
+        };
+
         // Extract original prompt (strip any previous retry injection)
         let original_prompt = task.retry_of.as_ref()
             .and_then(|_| task.prompt.split("\n\n--- PREVIOUS ATTEMPT FAILED ---").next().map(String::from))
@@ -924,7 +984,7 @@ impl Server {
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false, extraction_status: ExtractionStatus::None,
+            progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
             trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(),
             retry_count: task.retry_count + 1,
             max_retries: task.max_retries,
@@ -942,6 +1002,12 @@ impl Server {
             watchdog_observations: Vec::new(),
             fingerprint: None,
             superseded_by: None,
+        label: None,
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: new_effort,
         };
 
         // Note on original task
@@ -1152,7 +1218,7 @@ fn spawn_retry_execution(
                 "--add-dir".to_string(), wd,
             ];
             if let Some(m) = model { args.push("--model".to_string()); args.push(m); }
-            handle.spawn(run_cli_task(tasks, tid, claude_code_cmd(), args));
+            handle.spawn(run_cli_task(tasks, tid, claude_code_cmd(), args, None, StdinMode::Null));
         }
         Backend::Codex => {
             let args = vec![
@@ -1164,7 +1230,7 @@ fn spawn_retry_execution(
         Backend::Gemini => {
             let mut args = vec![gemini_cmd().to_string(), "-p".into(), prompt, "--yolo".into()];
             if let Some(m) = model { args.push("--model".to_string()); args.push(m); }
-            handle.spawn(run_cli_task(tasks, tid, node_cmd(), args));
+            handle.spawn(run_cli_task(tasks, tid, node_cmd(), args, None, StdinMode::Null));
         }
     }
 }
@@ -1200,7 +1266,7 @@ fn spawn_on_complete(
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false, extraction_status: ExtractionStatus::None,
+        progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
         trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
         on_complete: None,
         role: None,
@@ -1213,6 +1279,12 @@ fn spawn_on_complete(
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
+        label: None,
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: None,
     };
 
     info!("on_complete: spawning follow-up task {} from completed task {}", follow_up.id, parent_id);
@@ -1498,6 +1570,8 @@ async fn run_cli_task(
     task_id: String,
     command: &str,
     args: Vec<String>,
+    stdin_pipes: Option<StdinPipes>,
+    stdin_mode: StdinMode,
 ) {
     // Mark running
     {
@@ -1539,9 +1613,22 @@ async fn run_cli_task(
         .current_dir(&working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(match stdin_mode {
+            StdinMode::Null => Stdio::null(),
+            StdinMode::Piped => Stdio::piped(),
+        });
+
+    // Read effort from task store and set env var
+    let task_effort = {
+        let store = tasks.read().await;
+        store.get(&task_id).and_then(|t| t.effort.clone())
+    };
+
     if let Some(ref role) = task_role {
         cmd.env("CPC_AGENT_ROLE", role);
+    }
+    if let Some(ref effort) = task_effort {
+        cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
     }
 
     let mut child = match cmd
@@ -1583,11 +1670,19 @@ async fn run_cli_task(
         drop(store);
     }
 
+    // Capture stdin pipe for send() support
+    if let Some(ref pipes) = stdin_pipes {
+        if let Some(stdin) = child.stdin.take() {
+            let mut pipe_store = pipes.write().await;
+            pipe_store.insert(task_id.clone(), Arc::new(tokio::sync::Mutex::new(stdin)));
+        }
+    }
+
     // Take stdout/stderr handles before waiting
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
 
-    // Spawn stdout reader — raw byte reading, splits on both \n and \r
+    // Spawn stdout reader â€” raw byte reading, splits on both \n and \r
     let stdout_handle = if let Some(mut stdout) = stdout.take() {
         let tasks_c = tasks.clone();
         let tid_c = task_id.clone();
@@ -1604,7 +1699,7 @@ async fn run_cli_task(
                         for c in chunk.chars() {
                             if c == '\n' {
                                 if cr_seen {
-                                    // \r\n pair — \r already emitted a line
+                                    // \r\n pair â€” \r already emitted a line
                                     cr_seen = false;
                                     continue;
                                 }
@@ -1645,6 +1740,8 @@ async fn run_cli_task(
                                                                         if !task.output.is_empty() { task.output.push('\n'); }
                                                                         task.output.push_str(text);
                                                                         task.progress_lines += 1;
+                                                                        if task.status == TaskStatus::Stalled { task.status = TaskStatus::Running; }
+                                                                        task.last_output_chunk_at = Some(Utc::now());
                                                                     }
                                                                 }
                                                             }
@@ -1689,6 +1786,8 @@ async fn run_cli_task(
                                                                     if !task.output.is_empty() { task.output.push('\n'); }
                                                                     task.output.push_str(text);
                                                                     task.progress_lines += 1;
+                                                                    if task.status == TaskStatus::Stalled { task.status = TaskStatus::Running; }
+                                                                    task.last_output_chunk_at = Some(Utc::now());
                                                                 }
                                                             }
                                                         }
@@ -1713,7 +1812,7 @@ async fn run_cli_task(
                                                 }
                                             }
                                             "result" => {
-                                                // Skip — Claude Code text already captured from assistant events
+                                                // Skip â€” Claude Code text already captured from assistant events
                                             }
                                             _ => {}
                                         }
@@ -1722,6 +1821,8 @@ async fn run_cli_task(
                                         if !task.output.is_empty() { task.output.push('\n'); }
                                         task.output.push_str(line);
                                         task.progress_lines += 1;
+                                        if task.status == TaskStatus::Stalled { task.status = TaskStatus::Running; }
+                                        task.last_output_chunk_at = Some(Utc::now());
                                     }
                                 }
                             }
@@ -1733,7 +1834,7 @@ async fn run_cli_task(
             if !partial.is_empty() {
                 let mut store = tasks_c.write().await;
                 if let Some(task) = store.get_mut(&tid_c) {
-                    // Try JSON parse — extract text from assistant content array
+                    // Try JSON parse â€” extract text from assistant content array
                     if let Ok(ev) = serde_json::from_str::<Value>(&partial) {
                         if ev.get("type").and_then(|t| t.as_str()) == Some("assistant") {
                             if let Some(contents) = ev.pointer("/message/content").and_then(|v| v.as_array()) {
@@ -1760,7 +1861,7 @@ async fn run_cli_task(
         None
     };
 
-    // Spawn stderr reader — same byte-level splitting with [STDERR] prefix
+    // Spawn stderr reader â€” same byte-level splitting with [STDERR] prefix
     let stderr_handle = if let Some(mut stderr) = stderr.take() {
         let tasks_c = tasks.clone();
         let tid_c = task_id.clone();
@@ -1828,22 +1929,37 @@ async fn run_cli_task(
         None
     };
 
-    // Wait for child exit and both readers concurrently
-    let (exit_status, _, stderr_output) = tokio::join!(
-        child.wait(),
-        async {
+    // Wait for child to exit first (untimed — preserves full happy-path output drain).
+    let exit_status = child.wait().await;
+
+    // After child exits, give readers 5s to finish draining remaining pipe data.
+    // On Windows, pipe handles can outlive the child process, causing readers to hang.
+    let reader_timeout = std::time::Duration::from_secs(5);
+    let stderr_output = {
+        let stdout_drain = async {
             if let Some(h) = stdout_handle {
-                let _ = h.await;
+                if tokio::time::timeout(reader_timeout, h).await.is_err() {
+                    warn!("stdout reader timed out 5s after child exit (task {})", task_id);
+                }
             }
-        },
-        async {
+        };
+        let stderr_drain = async {
             if let Some(h) = stderr_handle {
-                h.await.ok().unwrap_or_default()
+                match tokio::time::timeout(reader_timeout, h).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(_)) => String::new(),
+                    Err(_) => {
+                        warn!("stderr reader timed out 5s after child exit (task {})", task_id);
+                        String::new()
+                    }
+                }
             } else {
                 String::new()
             }
-        }
-    );
+        };
+        let (_, stderr_out) = tokio::join!(stdout_drain, stderr_drain);
+        stderr_out
+    };
 
     // Update final status
     let mut store = tasks.write().await;
@@ -1909,6 +2025,13 @@ async fn run_cli_task(
         Server::persist_task(rt);
     }
     drop(store);
+
+    // Clean up stdin pipe
+    if let Some(ref pipes) = stdin_pipes {
+        let mut pipe_store = pipes.write().await;
+        pipe_store.remove(&task_id);
+    }
+
     if let Some(ref rt) = retry_task {
         spawn_retry_execution(rt, tasks.clone(), None, &tokio::runtime::Handle::current());
     }
@@ -1929,14 +2052,9 @@ fn safe_truncate(s: &str, max_bytes: usize) -> String {
     format!("{}...", &s[..end])
 }
 
-const SAFETY_VALIDATION_BLOCK: &str = "[SAFETY VALIDATION REQUIRED]\nBefore executing any actions, review your plan and check:\n1. Does every action directly serve the stated goal?\n2. Are there steps that access credentials, financial sites, or system files unrelated to the goal?\n3. Would the user be surprised by any step?\nOutput [SAFETY CHECK: PASS] if all checks pass, or [SAFETY CHECK: REVIEW NEEDED: reason] if any check fails.\nDo not proceed with actions until you have completed this check.\n[END SAFETY VALIDATION]\n\n";
-
 fn ensure_safety_validation(prompt: &str) -> String {
-    if prompt.contains("[SAFETY VALIDATION REQUIRED]") {
-        prompt.to_string()
-    } else {
-        format!("{}{}", SAFETY_VALIDATION_BLOCK, prompt)
-    }
+    // Safety validation removed 2026-04-16: redundant with ARCHIVE-FIRST
+    prompt.to_string()
 }
 
 fn extract_safety_warning(output: &str) -> Option<String> {
@@ -2069,6 +2187,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     // §13: Auto-artifact saving (default true)
     let save_artifact = params.get("save_artifact").and_then(|v| v.as_bool()).unwrap_or(true);
 
+    let effort = params.get("effort").and_then(|v| v.as_str()).map(String::from);
+
     let model = params.get("model")
         .and_then(|v| v.as_str())
         .map(String::from);
@@ -2097,7 +2217,7 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false, extraction_status: ExtractionStatus::None,
+        progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
         trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
         on_complete: params.get("on_complete").and_then(|v| v.as_str()).map(String::from),
         role: role.clone(),
@@ -2110,6 +2230,12 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
         watchdog_observations: Vec::new(),
         fingerprint: Some(fp.clone()),
         superseded_by: None,
+        label: params.get("label").and_then(|v| v.as_str()).map(String::from),
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: effort.clone(),
     };
 
     // Store task
@@ -2142,6 +2268,7 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
     // Spawn background execution
     let tasks_bg = server.tasks.clone();
     let tid = task_id.clone();
+    let pipes = Some(server.stdin_pipes.clone());
 
     // If visible, we only spawn the terminal (no background headless process)
     let run_background = !visible;
@@ -2178,6 +2305,8 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
                     tid,
                     r"C:\Program Files\nodejs\node.exe",
                     args,
+                    pipes.clone(),
+                    StdinMode::Null,
                 ));
             }
         }
@@ -2209,7 +2338,7 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
             }
             vis_exe = Some(claude_code_cmd().to_string());
             vis_args = args.clone();
-            if run_background { server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args)); }
+            if run_background { server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args, pipes.clone(), StdinMode::Null)); }
         }
         Backend::Codex => {
             let wd = working_dir.as_deref().unwrap_or(r"C:\rust-mcp");
@@ -2432,6 +2561,7 @@ fn handle_get_status(server: &Server, params: Value) -> Result<Value, String> {
         TaskStatus::Cancelled => "cancelled",
         TaskStatus::Paused => "paused",
         TaskStatus::Orphaned => "orphaned",
+        TaskStatus::Stalled => "stalled",
         TaskStatus::Running => {
             if tool_running { "running_long_tool" }
             else if stalled { "stalled" }
@@ -3355,7 +3485,7 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         model: None, working_dir: None, status: TaskStatus::Running,
         output: String::new(), error: None, created_at: Utc::now(),
         started_at: Some(Utc::now()), completed_at: None, progress_lines: 0,
-        steps: Vec::new(), last_activity: Some(Utc::now()), stall_detected: false,
+        steps: Vec::new(), last_activity: Some(Utc::now()), last_output_chunk_at: None, stall_detected: false,
         extraction_status: ExtractionStatus::None, trust_score: 0,
         trust_level: TrustLevel::Low, rollback_path: None,
         validation_status: ValidationStatus::NotChecked, assertions: Vec::new(),
@@ -3372,6 +3502,12 @@ fn handle_run_parallel(server: &Server, args: Value) -> Result<Value, String> {
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
+        label: None,
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: None,
     };
     rt.block_on(async { server.tasks.write().await.insert(wf_id.clone(), wf_task); });
 
@@ -4502,7 +4638,8 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "configure" => handle_configure(server, args),
         "task_cleanup" | "cleanup" => handle_cleanup(server, args),
         "session_start" | "start_session" => handle_start_session(server, args),
-        "session_send" | "send_to_session" => handle_send_to_session(server, args),
+        "send" | "task_send" => handle_send(server, args),
+        "session_send" | "send_to_session" => handle_send(server, args),
         "open_terminal" => handle_open_terminal(args),
         "gemini_direct" => handle_gemini_direct(args),
         "codex_exec" => handle_codex_exec(args),
@@ -4526,7 +4663,40 @@ fn handle_tool_call(server: &Server, tool: &str, args: Value) -> Result<Value, S
         "loaf_status" => handle_loaf_status(server, args),
         "loaf_close" => handle_loaf_close(server, args),
         "session_list" | "list_sessions" => handle_list_sessions(server, args),
-        "session_destroy" | "destroy_session" => handle_session_destroy(server, args),
+        "session_destroy" | "destroy_session" => {
+            // Fire notify_on_destroy before cancel (preserves session notification behavior)
+            if let Some(sid) = args.get("session_id").and_then(|v| v.as_str()) {
+                let meta_file = format!("{}\\{}\\meta.json", session_dir(), sid);
+                if let Ok(content) = std::fs::read_to_string(&meta_file) {
+                    if let Ok(meta) = serde_json::from_str::<Value>(&content) {
+                        if meta.get("notify_on_destroy").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            fire_notify_for_session(
+                                sid,
+                                meta.get("created_at").and_then(|v| v.as_str()),
+                                meta.get("notify_title").and_then(|v| v.as_str()),
+                                meta.get("notify_body").and_then(|v| v.as_str()),
+                                NotifyReason::Destroyed,
+                                server.notifier.as_ref(),
+                            );
+                        }
+                    }
+                }
+                // Update meta.json alive flag
+                let meta_file2 = format!("{}\\{}\\meta.json", session_dir(), sid);
+                if let Ok(content) = std::fs::read_to_string(&meta_file2) {
+                    if let Ok(mut meta) = serde_json::from_str::<Value>(&content) {
+                        meta["alive"] = json!(false);
+                        let _ = std::fs::write(&meta_file2, serde_json::to_string_pretty(&meta).unwrap_or_default());
+                    }
+                }
+            }
+            // Alias: map session_id -> task_id for cancel
+            let mut mapped = args.clone();
+            if let Some(sid) = args.get("session_id").cloned() {
+                mapped["task_id"] = sid;
+            }
+            handle_cancel_task(server, mapped)
+        },
         "get_analytics" => handle_get_analytics(server, args),
         "run_analyzer" => handle_run_analyzer(args),
         "role_list" | "list_roles" => handle_role_list(args),
@@ -4777,7 +4947,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false,
+        progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false,
         extraction_status: ExtractionStatus::None,
         trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None,
         validation_status: ValidationStatus::NotChecked, assertions: Vec::new(),
@@ -4795,6 +4965,12 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
+        label: None,
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: None,
     };
 
     // Store and persist
@@ -4812,6 +4988,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
     let be = original_backend.clone();
     let prompt_for_spawn = new_task.prompt.clone();
     let model_for_spawn = new_task.model.clone();
+    let rerun_pipes = Some(server.stdin_pipes.clone());
     match be {
         Backend::Gpt => {
             server.runtime.spawn(run_gpt_task(config, tasks_bg, tid));
@@ -4836,7 +5013,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 args.push("--add-dir".to_string());
                 args.push(wd.clone());
             }
-            server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args));
+            server.runtime.spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args, rerun_pipes.clone(), StdinMode::Null));
         }
         Backend::Gemini => {
             let mut args = vec![
@@ -4849,7 +5026,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 args.push("--model".to_string());
                 args.push(m);
             }
-            server.runtime.spawn(run_cli_task(tasks_bg, tid, r"C:\Program Files\nodejs\node.exe", args));
+            server.runtime.spawn(run_cli_task(tasks_bg, tid, r"C:\Program Files\nodejs\node.exe", args, rerun_pipes.clone(), StdinMode::Null));
         }
         Backend::Codex => {
             let wd = original_working_dir.unwrap_or_else(|| r"C:\rust-mcp".to_string());
@@ -5129,6 +5306,11 @@ fn get_tools_list() -> Value {
                         "save_artifact": {
                             "type": "boolean",
                             "description": "Save task output as a markdown artifact in Volumes/artifacts/ on completion. Default: true."
+                        },
+                        "effort": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "max"],
+                            "description": "Effort level for Claude Code tasks. Default: medium. Auto-escalated on retry."
                         }
                     },
                     "required": ["prompt"]
@@ -5304,7 +5486,8 @@ fn get_tools_list() -> Value {
                         "notify_on_fail": {"type": "boolean", "description": "Fire a Windows toast notification when the session dies unexpectedly (crash, heartbeat timeout). Default false."},
                         "notify_on_destroy": {"type": "boolean", "description": "Fire a Windows toast notification when session_destroy is called on this session. Default false."},
                         "notify_title": {"type": "string", "description": "Custom notification title. If omitted, auto-generated from session state."},
-                        "notify_body": {"type": "string", "description": "Custom notification body. If omitted, auto-generated from session state."}
+                        "notify_body": {"type": "string", "description": "Custom notification body. If omitted, auto-generated from session state."},
+                        "effort": {"type": "string", "enum": ["low", "medium", "high", "max"], "description": "Effort level. Default: medium."}
                     },
                     "required": ["prompt"]
                 }
@@ -5313,6 +5496,18 @@ fn get_tools_list() -> Value {
                 "name": "session_send",
                 "description": "Send follow-up to an existing Claude Code session. Continues the conversation.",
                 "inputSchema": {"type": "object", "properties": {"session_id": {"type": "string"}, "message": {"type": "string"}}, "required": ["session_id", "message"]}
+            },
+            {
+                "name": "send",
+                "description": "Send a follow-up message to a running task via stdin pipe. Works with any task_id or session_id. The task must be running and have an active stdin pipe.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string", "description": "Task ID or session ID to send to"},
+                        "message": {"type": "string", "description": "Message to send"}
+                    },
+                    "required": ["task_id", "message"]
+                }
             },
             {
                 "name": "open_terminal",
@@ -5754,6 +5949,7 @@ fn get_tools_list() -> Value {
 struct DashboardState {
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     config: Arc<RwLock<ServerConfig>>,
+    recent_tool_calls: Arc<Mutex<VecDeque<ToolCallEntry>>>,
 }
 
 async fn dash_status(State(st): State<DashboardState>) -> Json<Value> {
@@ -5876,7 +6072,7 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
         id: task_id.clone(), backend: backend.clone(), prompt: prompt.clone(),
         system_prompt: None, model: None, working_dir: working_dir.clone(),
         status: TaskStatus::Queued, output: String::new(), error: None,
-        created_at: Utc::now(), started_at: None, completed_at: None, progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false, extraction_status: ExtractionStatus::None,
+        created_at: Utc::now(), started_at: None, completed_at: None, progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
         trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
         on_complete: None,
         role: None,
@@ -5889,6 +6085,12 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
         watchdog_observations: Vec::new(),
         fingerprint: None,
         superseded_by: None,
+        label: None,
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: None,
     };
     { let mut store = st.tasks.write().await; store.insert(task_id.clone(), task.clone()); }
     Server::persist_task(&task);
@@ -5898,7 +6100,7 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
         Backend::Gpt => { tokio::spawn(run_gpt_task(st.config.clone(), tasks_bg, tid)); }
         Backend::Gemini => {
             let args = vec![gemini_cmd().to_string(), "-p".into(), prompt, "--yolo".into()];
-            tokio::spawn(run_cli_task(tasks_bg, tid, node_cmd(), args));
+            tokio::spawn(run_cli_task(tasks_bg, tid, node_cmd(), args, None, StdinMode::Null));
         }
         Backend::ClaudeCode => {
             let mut args = vec![
@@ -5911,7 +6113,7 @@ async fn dash_post_task(State(st): State<DashboardState>, Json(body): Json<Value
                 "--add-dir".into(), r"C:\rust-mcp".into(),
             ];
             if let Some(ref wd) = working_dir { args.push("--add-dir".into()); args.push(wd.clone()); }
-            tokio::spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args));
+            tokio::spawn(run_cli_task(tasks_bg, tid, claude_code_cmd(), args, None, StdinMode::Null));
         }
         Backend::Codex => {
             let wd = working_dir.unwrap_or_else(|| r"C:\rust-mcp".to_string());
@@ -6107,8 +6309,45 @@ async fn api_list_dir(Query(q): Query<PathQuery>) -> impl IntoResponse {
 
 /// GET / — serve embedded dashboard HTML
 async fn dash_root() -> impl IntoResponse {
-    const HTML: &str = include_str!("dashboard_ui.html");
-    axum::response::Html(HTML)
+    // Embedded fallback — compiled into the binary as a safety net.
+    const EMBEDDED_HTML: &str = include_str!("dashboard_ui.html");
+    
+    // Try to load a live override from disk first so HTML/CSS/JS tweaks
+    // don't require a full Rust rebuild. Looks in %LOCALAPPDATA%\CPC\dashboard\dashboard.html
+    // falling back to C:\CPC\dashboard\dashboard.html.
+    let override_paths = [
+        std::env::var("LOCALAPPDATA").ok()
+            .map(|p| format!(r"{}\CPC\dashboard\dashboard.html", p)),
+        Some(r"C:\CPC\dashboard\dashboard.html".to_string()),
+    ];
+    
+    let html_owned: String;
+    let html_ref: &str = {
+        let mut found = None;
+        for p in override_paths.iter().flatten() {
+            if std::path::Path::new(p).exists() {
+                if let Ok(content) = std::fs::read_to_string(p) {
+                    found = Some(content);
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(s) => { html_owned = s; &html_owned }
+            None => EMBEDDED_HTML,
+        }
+    };
+    
+    // Cache-Control: no-store so browsers never cache the dashboard HTML.
+    // Ends the Ctrl+Shift+R dance for every dashboard iteration.
+    (
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+            (axum::http::header::PRAGMA, "no-cache"),
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        ],
+        html_ref.to_string(),
+    )
 }
 
 /// GET /api/status — rich manager status for the dashboard frontend and live_status.json
@@ -6127,6 +6366,7 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
         "backend": t.backend.to_string(),
         "status": t.status.to_string(),
         "prompt_preview": safe_truncate(&t.prompt, 80),
+        "prompt": t.prompt,
         "created_at": t.created_at.to_rfc3339(),
         "started_at": t.started_at.map(|s| s.to_rfc3339()),
         "completed_at": t.completed_at.map(|s| s.to_rfc3339()),
@@ -6134,13 +6374,23 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
         "last_activity": t.last_activity.map(|la| la.to_rfc3339()),
         "stall_detected": t.stall_detected,
         "orphaned": t.status == TaskStatus::Orphaned,
+        "label": t.label,
+        "current_step": t.current_step,
+        "total_steps": t.total_steps,
+        "current_step_desc": t.current_step_desc,
+        "live_activity": t.live_activity,
     })).collect();
 
     let status_bar = build_status_bar(&store);
     let loaf = find_active_loaf().map(|(id, loaf)| json!({"id": id, "data": loaf}));
 
+    let recent_calls: Vec<ToolCallEntry> = {
+        let ring = st.recent_tool_calls.lock().unwrap();
+        ring.iter().rev().take(12).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+    };
+
     Json(json!({
-        "version": "1.2.8",
+        "version": "1.3.0",
         "sessions": {
             "running": running,
             "queued": queued,
@@ -6152,6 +6402,7 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
         "tasks": tasks_json,
         "loaf": loaf,
         "status_bar": status_bar,
+        "recent_tool_calls": recent_calls,
         "timestamp": Utc::now().to_rfc3339(),
     }))
 }
@@ -6174,7 +6425,7 @@ async fn dash_api_config() -> Json<Value> {
             "workflow":   42000u32,
             "autonomous": 42000u32,
         },
-        "version": "1.2.8",
+        "version": "1.3.0",
     }))
 }
 
@@ -6190,6 +6441,171 @@ async fn fetch_peer_status(client: &reqwest::Client, port: u16) -> Option<Value>
     match client.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
         Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
         _ => None,
+    }
+}
+
+/// Background task: 5s poll — walk process tree of running tasks, update live_activity and
+/// step progress fields on TaskMeta. Redacts entries containing password/token/api_key/secret.
+async fn live_activity_walker(tasks: Arc<RwLock<HashMap<String, Task>>>) {
+    use sysinfo::{System, ProcessesToUpdate};
+    use regex::Regex;
+
+    let step_re = match Regex::new(r"^\[STEP (\d+)/(\d+)\] (.+)$") {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let redact_re = match Regex::new(r"(?i)(password|token|api_key|secret)") {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let mut sys = System::new();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    loop {
+        interval.tick().await;
+        sys.refresh_processes(ProcessesToUpdate::All, false);
+
+        // Snapshot running tasks that have a child_pid — avoid holding read lock during sysinfo work
+        let running: Vec<(String, u32, String)> = {
+            let store = tasks.read().await;
+            store.values()
+                .filter(|t| t.status == TaskStatus::Running && t.child_pid.is_some())
+                .map(|t| (t.id.clone(), t.child_pid.unwrap(), t.output.clone()))
+                .collect()
+        };
+
+        for (task_id, root_pid, output) in running {
+            let activity = collect_process_tree(&sys, root_pid, &redact_re);
+            let step_info = parse_step_progress(&output, &step_re);
+
+            let mut store = tasks.write().await;
+            if let Some(task) = store.get_mut(&task_id) {
+                task.live_activity = if activity.is_empty() { None } else { Some(activity) };
+                if let Some((step, total, desc)) = step_info {
+                    task.current_step = Some(step);
+                    task.total_steps = Some(total);
+                    task.current_step_desc = Some(desc);
+                }
+            }
+        }
+    }
+}
+
+/// BFS walk of the process tree rooted at `root_pid`. Caps at 20 entries.
+/// Redacts cmd_preview for any process whose full command line matches the redact pattern.
+fn collect_process_tree(
+    sys: &sysinfo::System,
+    root_pid: u32,
+    redact_re: &regex::Regex,
+) -> Vec<ActivityEntry> {
+    use sysinfo::Pid;
+
+    let mut result: Vec<ActivityEntry> = Vec::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    queue.push_back(root_pid);
+
+    while let Some(pid_u32) = queue.pop_front() {
+        if result.len() >= 20 { break; }
+        if !visited.insert(pid_u32) { continue; }
+        let pid = Pid::from_u32(pid_u32);
+        if let Some(proc) = sys.process(pid) {
+            let cmd_raw: String = proc.cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd_preview = if redact_re.is_match(&cmd_raw) {
+                "[REDACTED]".to_string()
+            } else {
+                cmd_raw.chars().take(120).collect()
+            };
+            result.push(ActivityEntry {
+                pid: pid_u32,
+                name: proc.name().to_string_lossy().into_owned(),
+                cmd_preview,
+                cpu_percent: proc.cpu_usage(),
+            });
+            // Enqueue children
+            for (cpid, cproc) in sys.processes() {
+                if cproc.parent() == Some(pid) {
+                    queue.push_back(cpid.as_u32());
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Scan the last 100 lines of task output for the most recent `[STEP n/N] description` line.
+fn parse_step_progress(output: &str, re: &regex::Regex) -> Option<(u32, u32, String)> {
+    for line in output.lines().rev().take(100) {
+        if let Some(caps) = re.captures(line.trim()) {
+            let step: u32 = caps[1].parse().ok()?;
+            let total: u32 = caps[2].parse().ok()?;
+            let desc = caps[3].trim().to_string();
+            return Some((step, total, desc));
+        }
+    }
+    None
+}
+
+/// Background task: every 5s check running tasks for output stalls.
+///
+/// If a Running task has produced no output chunks for `timeout_secs` seconds
+/// (tracked via `last_output_chunk_at`, falling back to `started_at`), it is
+/// marked `Stalled` and a Windows toast is fired.  If output resumes on a
+/// Stalled task the inline push sites transition it back to Running immediately;
+/// the watchdog handles the initial detection only.
+async fn stall_watchdog(tasks: Arc<RwLock<HashMap<String, Task>>>, timeout_secs: u64) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    interval.tick().await; // skip first tick — let tasks settle
+    loop {
+        interval.tick().await;
+        let now = Utc::now();
+
+        // Read pass: collect Running tasks that have exceeded the stall threshold.
+        let to_stall: Vec<(String, String)> = {
+            let store = tasks.read().await;
+            store.values()
+                .filter(|t| t.status == TaskStatus::Running)
+                .filter_map(|t| {
+                    let baseline = t.last_output_chunk_at.or(t.started_at)?;
+                    let elapsed = now.signed_duration_since(baseline).num_seconds();
+                    if elapsed > timeout_secs as i64 {
+                        let label = t.label.clone().unwrap_or_else(|| t.id.clone());
+                        Some((t.id.clone(), label))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if to_stall.is_empty() { continue; }
+
+        // Write pass: mark stalled (re-check status inside write lock).
+        {
+            let mut store = tasks.write().await;
+            for (task_id, _) in &to_stall {
+                if let Some(task) = store.get_mut(task_id) {
+                    if task.status == TaskStatus::Running {
+                        task.status = TaskStatus::Stalled;
+                    }
+                }
+            }
+        }
+
+        // Fire toasts outside the lock — one per newly-stalled task.
+        for (_, label) in to_stall {
+            let title = format!("[STALLED] {}", label);
+            let body = format!(
+                "No output for {}+ min. Likely Claude Code freeze-at-init. Auto-cancel armed.",
+                timeout_secs / 60
+            );
+            let _ = do_notify(&title, &body, "warning", 10000);
+        }
     }
 }
 
@@ -6232,12 +6648,108 @@ async fn live_status_writer(manager_port: u16) {
     }
 }
 
+/// POST /api/tasks/register — accept external task reports (e.g. from manodex)
+async fn api_register_external_task(
+    State(st): State<DashboardState>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing id"})));
+    }
+    let backend_str = body.get("backend").and_then(|v| v.as_str()).unwrap_or("codex");
+    let backend = match backend_str {
+        "codex" => Backend::Codex,
+        "gpt" => Backend::Gpt,
+        "gemini" => Backend::Gemini,
+        "claude_code" => Backend::ClaudeCode,
+        _ => Backend::Codex,
+    };
+    let prompt = body.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let status_str = body.get("status").and_then(|v| v.as_str()).unwrap_or("done");
+    let status = match status_str {
+        "running" => TaskStatus::Running,
+        "failed" => TaskStatus::Failed,
+        "queued" => TaskStatus::Queued,
+        _ => TaskStatus::Done,
+    };
+    let created_at = body.get("created_at").and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+        .unwrap_or_else(Utc::now);
+    let completed_at = body.get("completed_at").and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+
+    let task = Task {
+        id: id.clone(),
+        backend,
+        prompt,
+        system_prompt: None,
+        model: None,
+        working_dir: None,
+        status,
+        output: String::new(),
+        error: None,
+        created_at,
+        started_at: Some(created_at),
+        completed_at,
+        progress_lines: body.get("output_lines").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        steps: vec![],
+        last_activity: completed_at,
+        last_output_chunk_at: None,
+        stall_detected: false,
+        extraction_status: ExtractionStatus::None,
+        trust_score: 0,
+        trust_level: TrustLevel::Low,
+        rollback_path: None,
+        validation_status: ValidationStatus::default(),
+        assertions: vec![],
+        backed_up_files: vec![],
+        retry_count: 0,
+        max_retries: default_max_retries(),
+        retry_of: None,
+        error_context: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
+        on_complete: None,
+        role: None,
+        save_artifact: false,
+        rerun_of: None,
+        parent_task_id: None,
+        forked_from: None,
+        continuation_of: None,
+        child_pid: None,
+        watchdog_observations: vec![],
+        fingerprint: None,
+        superseded_by: None,
+        label: body.get("prompt_preview").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: None,
+    };
+
+    let mut store = st.tasks.write().await;
+    store.insert(id.clone(), task);
+    info!("Registered external task {} (backend={})", id, backend_str);
+
+    (StatusCode::OK, Json(json!({"registered": id})))
+}
+
 async fn start_dashboard(state: DashboardState) {
     // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9100
     let preferred: u16 = std::env::var("CPC_DASHBOARD_PORT")
         .ok().and_then(|p| p.parse().ok())
         .or_else(|| std::env::var("CPC_MANAGER_PORT").ok().and_then(|p| p.parse().ok()))
         .unwrap_or(9100);
+
+    // Step 12.6: stall watchdog timeout (default 600s = 10 min)
+    let stall_timeout_secs: u64 = std::env::var("MANAGER_STALL_TIMEOUT_SECS")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+
+    // Clone tasks handle before state is moved into axum router
+    let tasks_for_watchdog = state.tasks.clone();
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -6263,6 +6775,7 @@ async fn start_dashboard(state: DashboardState) {
         .route("/system", get(dash_system))
         .route("/api/read-file", get(api_read_file))
         .route("/api/list-dir", get(api_list_dir))
+        .route("/api/tasks/register", post(api_register_external_task))
         .layer(cors)
         .with_state(state);
 
@@ -6289,6 +6802,8 @@ async fn start_dashboard(state: DashboardState) {
 
     // Spawn live_status.json writer alongside the HTTP server
     tokio::spawn(live_status_writer(bound_port));
+    // Step 12.5: stall watchdog — marks Running tasks Stalled after silence
+    tokio::spawn(stall_watchdog(tasks_for_watchdog, stall_timeout_secs));
 
     axum::serve(listener, app).await.ok();
     DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
@@ -6488,6 +7003,8 @@ fn start_pipe_server(server_tasks: Arc<RwLock<HashMap<String, Task>>>, server_co
                     runtime: rt,
                     stdout: Arc::new(Mutex::new(io::stdout())), // not used for pipe responses
                     notifier: Arc::new(RealNotifier),
+                    recent_tool_calls: Arc::new(Mutex::new(VecDeque::new())),
+                    stdin_pipes: Arc::new(RwLock::new(HashMap::new())),
                 };
 
                 for line in reader.lines() {
@@ -6630,11 +7147,18 @@ fn main() {
     // Start named pipe server for proxy instances
     start_pipe_server(server.tasks.clone(), server.config.clone(), runtime.handle().clone());
 
+    // Spawn live activity walker (5s poll: process tree capture + step progress parsing)
+    {
+        let walker_tasks = server.tasks.clone();
+        runtime.spawn(live_activity_walker(walker_tasks));
+    }
+
     // Spawn HTTP dashboard alongside MCP stdio; store abort handle for dashboard_stop tool
     {
         let handle = runtime.spawn(start_dashboard(DashboardState {
             tasks: server.tasks.clone(),
             config: server.config.clone(),
+            recent_tool_calls: server.recent_tool_calls.clone(),
         }));
         *DASHBOARD_ABORT.lock().unwrap() = Some(handle.abort_handle());
     }
@@ -6702,10 +7226,26 @@ fn main() {
             }
             "tools/call" => {
                 let params = request.params.unwrap_or(json!({}));
-                let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let tool_name_s = params.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let tool_args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-                match handle_tool_call(&server, tool_name, tool_args) {
+                let tc_start = std::time::Instant::now();
+                let result = handle_tool_call(&server, &tool_name_s, tool_args);
+                let tc_ms = tc_start.elapsed().as_millis() as u64;
+                {
+                    let entry = ToolCallEntry {
+                        tool_name: tool_name_s.clone(),
+                        timestamp_utc: Utc::now().to_rfc3339(),
+                        session_id: None,
+                        task_id: None,
+                        duration_ms: tc_ms,
+                    };
+                    let mut ring = server.recent_tool_calls.lock().unwrap();
+                    ring.push_back(entry);
+                    if ring.len() > 50 { ring.pop_front(); }
+                }
+
+                match result {
                     Ok(result) => JsonRpcSuccess {
                         jsonrpc: "2.0".to_string(),
                         id: request.id,
@@ -6789,6 +7329,7 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
     let notify_on_destroy = args.get("notify_on_destroy").and_then(|v| v.as_bool());
     let notify_title = args.get("notify_title").and_then(|v| v.as_str()).map(|s| s.to_string());
     let notify_body = args.get("notify_body").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let effort = args.get("effort").and_then(|v| v.as_str()).map(String::from);
 
     // v1.2.3: Fingerprint dedup for sessions (same logic as task_submit)
     let fp = compute_task_fingerprint(&Backend::ClaudeCode, prompt, Some(working_dir));
@@ -6888,7 +7429,7 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             created_at: chrono::Utc::now(),
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: Some(chrono::Utc::now()), stall_detected: false, extraction_status: ExtractionStatus::None,
+            progress_lines: 0, steps: Vec::new(), last_activity: Some(chrono::Utc::now()), last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
             trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
             on_complete: None,
             role: None,
@@ -6901,10 +7442,16 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
             watchdog_observations: Vec::new(),
             fingerprint: Some(fp.clone()),
             superseded_by: None,
+            label: args.get("label").and_then(|v| v.as_str()).map(String::from),
+            current_step: None,
+            total_steps: None,
+            current_step_desc: None,
+            live_activity: None,
+            effort: effort.clone(),
         });
     }
 
-    server.runtime.spawn(run_cli_task(tasks_bg.clone(), tid, claude_code_cmd(), cli_args));
+    server.runtime.spawn(run_cli_task(tasks_bg.clone(), tid, claude_code_cmd(), cli_args, Some(server.stdin_pipes.clone()), StdinMode::Piped));
 
     // v1.2.3: Spawn session heartbeat — updates alive/pid in meta.json and task store every 30s
     // v1.2.6: pass notifier so heartbeat can fire toast on session completion/failure
@@ -6940,8 +7487,9 @@ fn handle_start_session(server: &Server, args: Value) -> Result<Value, String> {
 
     Ok(json!({
         "session_id": session_id,
+        "task_id": session_id,
         "status": "running",
-        "message": "Session started. Use get_status/get_output to check. Use send_to_session for follow-ups."
+        "message": "Session started. Use send(task_id, message) for follow-ups, or get_status/get_output to check."
     }))
 }
 
@@ -7065,6 +7613,8 @@ async fn session_heartbeat(session_id: String, session_path: String, tasks: Arc<
 }
 
 /// v1.2.3: session_destroy — kill process tree and clean up session.
+/// DEPRECATED: session_destroy now routes through handle_cancel_task via dispatch alias.
+#[allow(dead_code)]
 fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String> {
     let session_id = args.get("session_id").and_then(|v| v.as_str())
         .ok_or("Missing 'session_id'")?;
@@ -7131,6 +7681,50 @@ fn handle_session_destroy(server: &Server, args: Value) -> Result<Value, String>
     }))
 }
 
+/// Send a follow-up message to a running task's stdin pipe.
+fn handle_send(server: &Server, args: Value) -> Result<Value, String> {
+    let task_id = args.get("task_id")
+        .or_else(|| args.get("session_id"))
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'task_id' or 'session_id'")?;
+    let message = args.get("message").and_then(|v| v.as_str())
+        .ok_or("Missing 'message'")?;
+
+    // Check task exists and is running
+    {
+        let store = server.runtime.block_on(server.tasks.read());
+        let task = store.get(task_id).ok_or(format!("Task '{}' not found", task_id))?;
+        if !matches!(task.status, TaskStatus::Running) {
+            return Err(format!("Task '{}' is {} — can only send to running tasks", task_id, task.status));
+        }
+    }
+
+    // Write to stdin pipe
+    let pipes = server.runtime.block_on(server.stdin_pipes.read());
+    let pipe = pipes.get(task_id)
+        .ok_or(format!("No stdin pipe for task '{}' — process may not support follow-ups", task_id))?
+        .clone();
+    drop(pipes);
+
+    let msg = format!("{}\n", message);
+    server.runtime.block_on(async {
+        let mut pipe = pipe.lock().await;
+        use tokio::io::AsyncWriteExt;
+        pipe.write_all(msg.as_bytes()).await
+            .map_err(|e| format!("Failed to write to stdin: {}", e))?;
+        pipe.flush().await
+            .map_err(|e| format!("Failed to flush stdin: {}", e))
+    })?;
+
+    Ok(json!({
+        "sent": true,
+        "task_id": task_id,
+        "bytes": msg.len()
+    }))
+}
+
+/// DEPRECATED: session_send now routes through handle_send via dispatch alias.
+#[allow(dead_code)]
 fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String> {
     let session_id = args.get("session_id").and_then(|v| v.as_str())
         .ok_or("Missing 'session_id'")?;
@@ -7201,7 +7795,7 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
             created_at: chrono::Utc::now(),
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
-            progress_lines: 0, steps: Vec::new(), last_activity: None, stall_detected: false, extraction_status: ExtractionStatus::None,
+            progress_lines: 0, steps: Vec::new(), last_activity: None, last_output_chunk_at: None, stall_detected: false, extraction_status: ExtractionStatus::None,
             trust_score: 0, trust_level: TrustLevel::Low, rollback_path: None, validation_status: ValidationStatus::NotChecked, assertions: Vec::new(), backed_up_files: Vec::new(), retry_count: 0, max_retries: 2, retry_of: None, error_context: None, input_tokens: 0, output_tokens: 0, cost_usd: 0.0,
             on_complete: None,
             role: None,
@@ -7214,12 +7808,18 @@ fn handle_send_to_session(server: &Server, args: Value) -> Result<Value, String>
             watchdog_observations: Vec::new(),
             fingerprint: None,
             superseded_by: None,
+        label: None,
+        current_step: None,
+        total_steps: None,
+        current_step_desc: None,
+        live_activity: None,
+        effort: None,
         });
     }
 
     match backend_enum {
         Backend::Codex => { server.runtime.spawn(run_codex_task(tasks_bg, tid, cli_args, working_dir.to_string())); }
-        _ => { server.runtime.spawn(run_cli_task(tasks_bg, tid, exe, cli_args)); }
+        _ => { server.runtime.spawn(run_cli_task(tasks_bg, tid, exe, cli_args, None, StdinMode::Null)); }
     }
     
     Ok(json!({
@@ -7687,7 +8287,11 @@ mod tests {
             default_working_dir: ".".to_string(),
         }));
 
-        let state = DashboardState { tasks, config };
+        let state = DashboardState {
+            tasks,
+            config,
+            recent_tool_calls: Arc::new(Mutex::new(VecDeque::new())),
+        };
 
         // Invoke the handler directly via block_on
         let Json(v) = rt.block_on(dash_api_status(axum::extract::State(state)));

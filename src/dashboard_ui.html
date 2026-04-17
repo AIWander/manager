@@ -21,7 +21,7 @@
   --font: 'Segoe UI', system-ui, sans-serif;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg-primary); color: var(--text-primary); font-family: var(--font); font-size: 13px; line-height: 1.5; }
+body { background: var(--bg-primary); color: var(--text-primary); font-family: var(--font); font-size: 13px; line-height: 1.5; padding-bottom: 168px; }
 a { color: var(--accent-blue); text-decoration: none; }
 
 /* Layout */
@@ -70,7 +70,7 @@ select.filter-select { background: var(--bg-card); color: var(--text-secondary);
 .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 /* Session card */
-.session-card { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; cursor: pointer; transition: border-color 0.15s; }
+.session-card { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; cursor: pointer; transition: border-color 0.15s; user-select: none; }
 .session-card:hover { border-color: var(--accent-blue); background: var(--bg-card-hover); }
 .session-card.stalled { border-color: var(--accent-amber); }
 .session-card.orphaned-card { border-color: var(--accent-amber); }
@@ -146,6 +146,156 @@ body.view-summary #panels-row, body.view-summary #services-row, body.view-summar
 .show-all-link:hover { text-decoration: underline; }
 /* Expand panel bodies when service panels are hidden */
 body.no-services .panel-body { max-height: 520px; }
+
+/* ============================================================
+   v1.3 NEW: Bottom strip
+   ============================================================ */
+.bottom-strip {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 160px;
+  background: var(--bg-card);
+  border-top: 2px solid var(--border);
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  z-index: 100;
+}
+.zone-card {
+  padding: 8px 12px;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.zone-card:last-child { border-right: none; }
+.zone-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1px;
+  flex-shrink: 0;
+}
+.zone-body { flex: 1; overflow-y: auto; font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
+.zone-body::-webkit-scrollbar { width: 3px; }
+.zone-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+
+/* Detail takeover -- click card, right panel swaps content */
+.detail-view { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.detail-view .detail-body {
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 2px;
+}
+.detail-view .detail-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.panel-header .close-detail-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.panel-header .close-detail-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.session-card.selected { border-color: var(--accent-blue); background: var(--bg-card-hover); }
+
+
+/* Detail takeover -- click card, right panel swaps content */
+.detail-view { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.detail-view .detail-body {
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 2px;
+}
+.detail-view .detail-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.panel-header .close-detail-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+.panel-header .close-detail-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.session-card.selected { border-color: var(--accent-blue); background: var(--bg-card-hover); }
+
+/* Tool calls feed */
+.tool-calls-feed { display: flex; flex-direction: column; gap: 2px; }
+.tc-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid rgba(45,49,64,0.5); }
+.tc-row:last-child { border-bottom: none; }
+.tc-name { flex: 1; color: var(--text-primary); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-meta { color: var(--text-secondary); font-size: 10px; flex-shrink: 0; }
+.tc-dur { color: var(--accent-green); font-size: 10px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+
+/* Step progress */
+.step-progress { margin-top: 4px; }
+.step-progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.step-progress-fill { height: 100%; background: var(--accent-blue); border-radius: 2px; transition: width 0.3s; }
+.step-progress-label { font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
+
+/* Session label chip */
+.session-label-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  margin-bottom: 3px;
+  border: 1px solid transparent;
+}
+
+/* Live activity table */
+.live-activity-table { width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 6px; }
+.live-activity-table th { color: var(--text-secondary); text-align: left; padding: 2px 4px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.live-activity-table td { color: var(--text-primary); padding: 2px 4px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-activity-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+
+/* Stalled status */
+@keyframes stall-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.5); }
+  50%       { box-shadow: 0 0 0 5px rgba(245,158,11,0); }
+}
+.status-stalled {
+  border-color: var(--accent-amber) !important;
+  animation: stall-pulse 2s infinite;
+}
 </style>
 </head>
 <body class="view-full">
@@ -192,7 +342,7 @@ body.no-services .panel-body { max-height: 520px; }
 <!-- Main -->
 <div id="main">
 
-  <!-- Sessions + Breadcrumbs -->
+  <!-- Sessions + Tool Calls Feed -->
   <div id="panels-row">
     <div class="panel">
       <div class="panel-header">
@@ -203,10 +353,10 @@ body.no-services .panel-body { max-height: 520px; }
     </div>
     <div class="panel">
       <div class="panel-header">
-        <span>Breadcrumbs</span>
-        <span id="bc-count" style="font-size:10px;color:var(--text-secondary)"></span>
+        <span id="detail-panel-title">Session Detail</span>
+        <span id="tc-count" style="font-size:10px;color:var(--text-secondary)"></span>
       </div>
-      <div class="panel-body" id="breadcrumbs-panel"></div>
+      <div class="panel-body" id="tool-calls-panel"><div class="empty-state">Click a session or task to see full details</div></div>
     </div>
   </div>
 
@@ -257,6 +407,28 @@ body.no-services .panel-body { max-height: 520px; }
   <span id="action-status" style="font-size:11px;color:var(--text-secondary);margin-left:auto"></span>
 </div>
 
+<!-- Bottom Strip (fixed) -->
+<div class="bottom-strip" id="bottom-strip">
+  <div class="zone-card">
+    <div class="zone-title">Active Loafs</div>
+    <div class="zone-body" id="zone-loafs-body"><span style="color:var(--text-secondary)">—</span></div>
+  </div>
+  <div class="zone-card">
+    <div class="zone-title">Active Breadcrumb</div>
+    <div class="zone-body" id="zone-breadcrumb-body"><span style="color:var(--text-secondary)">—</span></div>
+  </div>
+  <div class="zone-card">
+    <div class="zone-title">Completed Today</div>
+    <div class="zone-body" id="zone-completed-body"><span style="color:var(--text-secondary)">—</span></div>
+  </div>
+  <div class="zone-card">
+    <div class="zone-title">Autonomous Pulse</div>
+    <div class="zone-body" id="zone-pulse-body"><span style="color:var(--text-secondary)">—</span></div>
+  </div>
+</div>
+
+</div><!-- /app -->
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -281,6 +453,9 @@ const GITHUB_REPOS = {
   workflow: 'workflow', autonomous: 'autonomous'
 };
 
+// Label colors for session-label-chip (6 distinct)
+const LABEL_COLORS = ['#3b82f6','#22c55e','#a855f7','#f59e0b','#ef4444','#06b6d4'];
+
 // ============================================================
 // Boot
 // ============================================================
@@ -296,6 +471,8 @@ async function boot() {
   }
   startPolling();
   setInterval(updateElapsedTimers, 1000);
+  // Tool Calls Feed removed 2026-04-16: it was overwriting the session-detail panel
+  // every 8s. The function body is kept as dead code for archaeology but never called.
 }
 
 function startPolling() {
@@ -312,7 +489,6 @@ function startPolling() {
 }
 
 // Servers that include a "server" discriminator field in their /api/status response.
-// Used to detect port collisions (e.g. hands fallback grabbing port 9104 = autonomous slot).
 const SERVER_DISCRIMINATORS = { local: 'local', hands: 'hands', workflow: 'workflow' };
 
 function trackFail(name) {
@@ -325,16 +501,16 @@ function trackFail(name) {
 }
 
 async function pollServer(name, url, intervalMs) {
+  if (!intervalMs || intervalMs < 1000) intervalMs = 5000;  // guard: undefined or pathologically small → 5s default
+  if (!intervalMs || intervalMs < 1000) intervalMs = 5000;  // guard: undefined or pathologically small → 5s default
   async function doFetch() {
     try {
       const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
       if (r.ok) {
         const data = await r.json();
-        // Fix 4: Port-collision guard — each server with a "server" field must match.
-        // Hands falls back 9102→9107, overlapping autonomous (9104). Reject if wrong server answered.
         const expected = SERVER_DISCRIMINATORS[name];
         if (expected && data.server && data.server !== expected) {
-          trackFail(name); // wrong server on this port — treat as miss
+          trackFail(name);
         } else {
           state.servers[name] = data;
           state.lastSeen[name] = Date.now();
@@ -348,7 +524,6 @@ async function pollServer(name, url, intervalMs) {
         trackFail(name);
       }
     } catch(e) {
-      // offline — keep last data but note time
       trackFail(name);
     }
     renderAll();
@@ -380,11 +555,11 @@ function setStatusFilter(f) {
 function renderAll() {
   renderHealthStrip();
   renderSessions();
-  renderBreadcrumbs();
   renderScorecard();
   renderHandsPanel();
   renderWorkflowPanel();
   renderAutonomousPanel();
+  renderBottomStrip();
   updatePartialInstallLayout();
   document.getElementById('last-refresh').textContent = `updated ${new Date().toLocaleTimeString()}`;
 }
@@ -402,18 +577,16 @@ function renderHealthStrip() {
     const data = state.servers[name];
     const seen = state.lastSeen[name];
 
-    // Hide pill entirely for optional servers that were never seen and are collapsed
     const isCollapsed = !state.showAll && state.collapsedNeverSeen[name];
     el.style.display = isCollapsed ? 'none' : '';
 
     if (seen) {
       const secAgo = Math.floor((Date.now() - seen) / 1000);
-      age.textContent = secAgo < 5 ? ' ●' : ` ${secAgo}s ago`;
+      age.textContent = secAgo < 5 ? ' just now' : ` ${secAgo}s ago`;
     }
 
     if (data && !data._error) {
       dot.className = 'server-dot dot-online';
-      // Fix 5: check top-level version, then server_version as fallback
       const v = data.version || data.server_version || '';
       ver.textContent = v ? ` v${v}` : '';
     } else if (seen) {
@@ -424,6 +597,7 @@ function renderHealthStrip() {
       ver.textContent = '';
     }
   });
+
 }
 
 // ============================================================
@@ -473,29 +647,84 @@ function renderSessions() {
       elapsed = `<span>${fmtDuration(ms)}</span>`;
     }
 
-    // Stall check
-    const stalled = t.last_activity && t.status === 'running' &&
-      (now - new Date(t.last_activity).getTime()) > 120000;
+    // Stall checks
+    const lastActMs = t.last_activity ? new Date(t.last_activity).getTime() : 0;
+    const stalled120 = lastActMs && t.status === 'running' && (now - lastActMs) > 120000;
+    const stalled600 = lastActMs && t.status === 'running' && (now - lastActMs) > 600000;
+
+    // Status classes
+    let cardClass = 'session-card';
+    if (stalled600) cardClass += ' status-stalled';
+    else if (stalled120) cardClass += ' stalled';
+    if (t.orphaned) cardClass += ' orphaned-card';
+
+    // Stall indicator in meta
+    let stallMeta = '';
+    if (stalled600) {
+      stallMeta = '· <span style="color:var(--accent-amber)" title="No output for 10+ min. Likely Claude Code freeze-at-init. Consider cancel + relaunch.">⚠ stalled 10m+</span>';
+    } else if (stalled120) {
+      stallMeta = '· <span style="color:var(--accent-amber)">⚠ stalled</span>';
+    }
 
     const stepsInfo = t.progress_lines ? `${t.progress_lines} lines` : '';
 
-    return `<div class="session-card${stalled?' stalled':''}${t.orphaned?' orphaned-card':''}" onclick="this.classList.toggle('expanded')">
+    // Label chip
+    let labelChipHtml = '';
+    if (t.label) {
+      let hash = 0;
+      for (let i = 0; i < t.label.length; i++) hash = (hash * 31 + t.label.charCodeAt(i)) & 0xffff;
+      const color = LABEL_COLORS[hash % LABEL_COLORS.length];
+      labelChipHtml = `<div class="session-label-chip" style="background:${color}22;color:${color};border-color:${color}55">${escHtml(t.label)}</div>`;
+    }
+
+    // Step progress bar
+    let stepProgressHtml = '';
+    if (t.current_step != null && t.total_steps != null && t.total_steps > 0) {
+      const pct = Math.round(t.current_step / t.total_steps * 100);
+      const desc = t.current_step_desc ? ` · ${escHtml(t.current_step_desc)}` : '';
+      stepProgressHtml = `<div class="step-progress">
+        <div class="step-progress-bar"><div class="step-progress-fill" style="width:${pct}%"></div></div>
+        <div class="step-progress-label">${t.current_step}/${t.total_steps}${desc}</div>
+      </div>`;
+    }
+
+    // Live activity table (shown in expanded .card-detail)
+    let liveActivityHtml = '';
+    if (t.live_activity && t.live_activity.length > 0) {
+      const rows = t.live_activity.map(a =>
+        `<tr><td>${a.pid}</td><td>${escHtml(a.name)}</td><td title="${escHtml(a.cmd_preview||'')}">${escHtml((a.cmd_preview||'').slice(0,40))}</td><td>${a.cpu_percent != null ? a.cpu_percent.toFixed(1)+'%' : '—'}</td></tr>`
+      ).join('');
+      liveActivityHtml = `<table class="live-activity-table">
+        <thead><tr><th>PID</th><th>Name</th><th>Cmd</th><th>CPU</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+
+    const promptAttr = escHtml(t.prompt || t.prompt_preview || '');
+
+    return `<div class="${cardClass}"
+      data-prompt="${promptAttr}"
+      onclick="openDetail(this)">
+      ${labelChipHtml}
       <div class="card-row">
         <span class="card-title">${t.id}</span>
         ${statusBadge}${backendBadge}${orphanBadge}
       </div>
       <div class="card-prompt">${escHtml(t.prompt_preview||'')}</div>
+      ${stepProgressHtml}
       <div class="card-meta">
         ${elapsed ? `⏱ ${elapsed}` : ''}
         ${stepsInfo ? `· ${stepsInfo}` : ''}
-        ${stalled ? '· <span style="color:var(--accent-amber)">⚠ stalled</span>' : ''}
+        ${stallMeta}
       </div>
-      <div class="card-detail">${t.created_at ? `Created: ${fmtTime(t.created_at)}` : ''}</div>
+      <div class="card-detail">
+        ${t.created_at ? `Created: ${fmtTime(t.created_at)}` : ''}
+        ${liveActivityHtml}
+      </div>
     </div>`;
   }
 
   if (groupByProject) {
-    // Group by backend as proxy for project (actual project_id not in task data)
     const groups = {};
     tasks.forEach(t => {
       const g = t.backend || 'unknown';
@@ -513,60 +742,142 @@ function renderSessions() {
 }
 
 // ============================================================
-// Breadcrumbs panel
+// Tool Calls Feed (aggregate from ports 9100-9103)
 // ============================================================
-function renderBreadcrumbs() {
-  const panel = document.getElementById('breadcrumbs-panel');
-  const data = state.servers.local;
+async function aggregateToolCalls() {
+  if (_detailMode) return;
+  if (_detailMode) return;
+  const cfg = state.config;
+  const ports = cfg
+    ? [cfg.ports.manager, cfg.ports.local, cfg.ports.hands, cfg.ports.workflow]
+    : [9100, 9101, 9102, 9103];
 
-  if (!data || !data.breadcrumbs) {
-    // Try to render placeholder from manager data
-    const mdata = state.servers.manager;
-    if (mdata && mdata.status_bar) {
-      const bc = mdata.status_bar.breadcrumb;
-      panel.innerHTML = bc && bc !== 'none'
-        ? `<div class="bc-card"><div class="card-row"><span class="card-title">${escHtml(bc)}</span></div><div class="card-meta">From manager status_bar</div></div>`
-        : '<div class="empty-state">No active breadcrumbs</div>';
-    } else {
-      panel.innerHTML = '<div class="offline-card">Local offline — breadcrumb data unavailable</div>';
+  const results = await Promise.allSettled(
+    ports.map(p =>
+      fetch(`http://127.0.0.1:${p}/api/status`, { signal: AbortSignal.timeout(3000) })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null)
+    )
+  );
+
+  const allCalls = [];
+  results.forEach(r => {
+    if (r.status === 'fulfilled' && r.value?.recent_tool_calls) {
+      allCalls.push(...r.value.recent_tool_calls);
     }
-    document.getElementById('bc-count').textContent = '';
+  });
+
+  // Dedupe by tool_name + timestamp_utc
+  const seen = new Set();
+  const deduped = allCalls.filter(c => {
+    const key = `${c.tool_name}|${c.timestamp_utc}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Sort descending by timestamp
+  deduped.sort((a, b) => new Date(b.timestamp_utc) - new Date(a.timestamp_utc));
+  const top12 = deduped.slice(0, 12);
+
+  const panel = document.getElementById('tool-calls-panel');
+  const countEl = document.getElementById('tc-count');
+
+  if (top12.length === 0) {
+    panel.innerHTML = '<div class="empty-state">No tool calls recorded</div>';
+    countEl.textContent = '';
     return;
   }
 
-  const bcs = data.breadcrumbs || [];
-  const active = bcs.filter(b => !b.aborted && b.steps_completed < b.total_steps);
-  document.getElementById('bc-count').textContent = `${active.length} active`;
-
-  if (active.length === 0) {
-    panel.innerHTML = '<div class="empty-state">No active breadcrumbs</div>';
-    return;
-  }
-
-  const now = Date.now();
-  panel.innerHTML = active.map(b => {
-    const current = b.current_step ?? b.steps_completed ?? 0;
-    const total = b.total_steps ?? 0;
-    const pct = total > 0 ? Math.round(current / total * 100) : 0;
-    const lastAct = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0;
-    const staleSecs = lastAct ? Math.floor((now - lastAct) / 1000) : null;
-    const stale = staleSecs !== null && staleSecs > 300;
-    const staleLabel = staleSecs !== null ? (staleSecs < 60 ? `${staleSecs}s ago` : `${Math.floor(staleSecs/60)}m ago`) : '';
-
-    return `<div class="bc-card${stale?' stale':''}">
-      <div class="card-row">
-        <span class="card-title">${escHtml(b.name||b.id)}</span>
-        <span class="badge badge-running">${current}/${total}</span>
-      </div>
-      <div class="bc-progress-bar"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
-      <div class="bc-progress-label">${current} / ${total} steps</div>
-      <div class="bc-meta">
-        ${b.project_id ? `<span>📁 ${escHtml(b.project_id)}</span>` : ''}
-        ${b.owner ? `<span>👤 ${escHtml(b.owner)}</span>` : ''}
-        ${staleLabel ? `<span style="color:${stale?'var(--accent-amber)':'inherit'}">${staleLabel}</span>` : ''}
-      </div>
+  countEl.textContent = `${top12.length} recent`;
+  panel.innerHTML = `<div class="tool-calls-feed">${top12.map(c => {
+    const t = new Date(c.timestamp_utc);
+    const timeStr = isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
+    const durStr = c.duration_ms != null ? `${c.duration_ms}ms` : '';
+    return `<div class="tc-row">
+      <span class="tc-name" title="${escHtml(c.tool_name)}">${escHtml(c.tool_name)}</span>
+      ${durStr ? `<span class="tc-dur">${durStr}</span>` : ''}
+      <span class="tc-meta">${timeStr}</span>
     </div>`;
-  }).join('');
+  }).join('')}</div>`;
+}
+
+// ============================================================
+// Bottom strip (4 zones)
+// ============================================================
+function renderBottomStrip() {
+  const mdata = state.servers.manager;
+  const ldata = state.servers.local;
+  const adata = state.servers.autonomous;
+
+  // Zone 1: Active Loafs
+  const loafBody = document.getElementById('zone-loafs-body');
+  if (mdata?.loaf) {
+    const loaf = mdata.loaf;
+    const loafId = loaf.id || 'active';
+    const loafStatus = loaf.data?.status || loaf.data?.health || '';
+    loafBody.innerHTML = `<div style="font-size:11px;color:var(--accent-green);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">● ${escHtml(String(loafId))}</div>
+      ${loafStatus ? `<div style="font-size:10px;color:var(--text-secondary)">${escHtml(String(loafStatus))}</div>` : ''}`;
+  } else {
+    loafBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active loaf</span>';
+  }
+
+  // Zone 2: Active Breadcrumb (from local)
+  const bcBody = document.getElementById('zone-breadcrumb-body');
+  if (ldata?.breadcrumbs) {
+    const bcs2 = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
+    const active = bcs2.filter(b => !b.aborted && (b.current_step ?? b.steps_completed ?? 0) < (b.total_steps ?? 0));
+    if (active.length > 0) {
+      const b = active[0];
+      const cur = b.current_step ?? b.steps_completed ?? 0;
+      const tot = b.total_steps ?? 0;
+      const pct = tot > 0 ? Math.round(cur / tot * 100) : 0;
+      bcBody.innerHTML = `<div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name||b.id)}">${escHtml(b.name||b.id)}</div>
+        <div class="bc-progress-bar" style="margin:4px 0 2px"><div class="bc-progress-fill" style="width:${pct}%"></div></div>
+        <div style="font-size:10px;color:var(--text-secondary)">${cur}/${tot} steps · ${pct}%</div>`;
+    } else {
+      bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">No active breadcrumb</span>';
+    }
+  } else if (mdata?.status_bar?.breadcrumb && mdata.status_bar.breadcrumb !== 'none') {
+    bcBody.innerHTML = `<div style="font-size:11px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(mdata.status_bar.breadcrumb)}</div>
+      <div style="font-size:10px;color:var(--text-secondary)">From manager status_bar</div>`;
+  } else {
+    bcBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">—</span>';
+  }
+
+  // Zone 3: Completed Today (last 3 from local breadcrumb history)
+  const compBody = document.getElementById('zone-completed-body');
+  if (ldata?.breadcrumbs) {
+    const bcs3 = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.active ?? []);
+    const completed = bcs3.filter(b =>
+      !b.aborted && b.name &&
+      (b.steps_completed ?? 0) >= (b.total_steps ?? 0) && (b.total_steps ?? 0) > 0
+    );
+    const last3 = completed.slice(-3).reverse();
+    if (last3.length > 0) {
+      compBody.innerHTML = last3.map(b =>
+        `<div style="font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(b.name)}">✓ ${escHtml(b.name)}</div>`
+      ).join('');
+    } else {
+      compBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">None today</span>';
+    }
+  } else {
+    compBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">—</span>';
+  }
+
+  // Zone 4: Autonomous Pulse
+  const pulseBody = document.getElementById('zone-pulse-body');
+  if (!adata || adata._error) {
+    pulseBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;font-style:italic">autonomous HTTP offline (port 9104)</span>';
+  } else {
+    const reminders = adata.reminders_due_today_count ?? adata.reminders_pending ?? '—';
+    const pendingExt = adata.pending_extractions_count ?? adata.pending_extractions ?? '—';
+    const lastExt = adata.last_extraction_at ? fmtTime(adata.last_extraction_at) : '—';
+    const remColor = (reminders !== '—' && reminders > 0) ? 'var(--accent-amber)' : 'var(--text-primary)';
+    pulseBody.innerHTML = `<div style="font-size:11px;color:var(--text-secondary)">Reminders due: <span style="color:${remColor}">${reminders}</span></div>
+      <div style="font-size:11px;color:var(--text-secondary)">Pending extracts: <span style="color:var(--text-primary)">${pendingExt}</span></div>
+      <div style="font-size:11px;color:var(--text-secondary)">Last extract: <span style="color:var(--text-primary)">${lastExt}</span></div>`;
+  }
 }
 
 // ============================================================
@@ -582,10 +893,8 @@ function renderScorecard() {
   const done = sessions.done || 0;
   const failed = sessions.failed || 0;
   const orphaned = sessions.orphaned || 0;
-  // Fix 6: old_binaries is an array in local.health.old_binaries, not a flat count
   const oldBins = ldata?.health?.old_binaries ?? [];
   const exeOld = Array.isArray(oldBins) ? oldBins.length : (ldata?.exe_old_count ?? '—');
-  // Fix 6: extractions — show '—' when unavailable (autonomous not polled directly)
   const extractions = mdata?.extractions_today ?? ldata?.extractions_today ?? '—';
 
   const items = [
@@ -625,13 +934,15 @@ function renderHandsPanel() {
     return;
   }
 
+  const lastCall = (data.recent_tool_calls && data.recent_tool_calls[0]) ? data.recent_tool_calls[0] : null;
+  const browser = data.browser || {};
   const rows = [
-    ['Browser', data.browser_status || data.status || '—'],
-    ['URL', data.current_url || data.url || '—'],
-    ['Tabs', data.tab_count ?? data.tabs ?? '—'],
-    ['Last action', data.last_action || '—'],
+    ['Browser', browser.status || '—'],
+    ['URL', browser.current_url || '—'],
+    ['Tabs', browser.tab_count ?? '—'],
+    ['Contexts', (Array.isArray(browser.contexts) ? (browser.contexts.length ? browser.contexts.join(', ') : '\u2014') : (browser.contexts ?? '\u2014'))],
+    ['Last tool', lastCall ? lastCall.tool_name : '—'],
     ['Version', data.version || '—'],
-    ['Uptime', data.uptime || '—'],
   ];
   grid.innerHTML = rows.map(([l,v]) =>
     `<span class="svc-label">${l}</span><span class="svc-value" title="${escHtml(String(v))}">${escHtml(String(v))}</span>`
@@ -658,12 +969,14 @@ function renderWorkflowPanel() {
     return;
   }
 
+  const wfLastCall = (data.recent_tool_calls && data.recent_tool_calls[0]) ? data.recent_tool_calls[0] : null;
   const rows = [
-    ['Credentials', data.credential_count ?? data.credentials?.count ?? '—'],
-    ['TOTP entries', data.totp_count ?? data.totp?.count ?? '—'],
-    ['Flows', data.flow_count ?? data.flows?.count ?? '—'],
-    ['Watches (active)', data.watch_count ?? data.watches?.active_count ?? '—'],
-    ['Last flow', data.flows?.last_run?.name || data.last_check || '—'],
+    ['Credentials', data.credentials?.count ?? '—'],
+    ['TOTP entries', data.totp?.count ?? '—'],
+    ['Flows', data.flows?.count ?? '—'],
+    ['Watches (active)', data.watches?.active_count ?? '—'],
+    ['Last flow', data.flows?.last_run?.name || '—'],
+    ['Last tool', wfLastCall ? wfLastCall.tool_name : '—'],
     ['Version', data.version || '—'],
   ];
   grid.innerHTML = rows.map(([l,v]) =>
@@ -710,6 +1023,53 @@ function updateElapsedTimers() {
     }
   });
 }
+
+// ============================================================
+// ============================================================
+// ============================================================
+// Session Detail panel (right side, always-on detail view)
+// ============================================================
+function openDetail(cardEl) {
+  const prompt = cardEl.dataset.prompt || '';
+  const taskId = cardEl.querySelector('.card-title')?.textContent || '';
+  if (!prompt) return;
+  
+  // Mark selected
+  document.querySelectorAll('.session-card.selected').forEach(el => el.classList.remove('selected'));
+  cardEl.classList.add('selected');
+  
+  // Update header title
+  const titleEl = document.getElementById('detail-panel-title');
+  if (titleEl) titleEl.textContent = taskId || 'Session Detail';
+  
+  // Build detail view
+  const panel = document.getElementById('tool-calls-panel');
+  const backend = cardEl.querySelector('.backend-badge')?.textContent || '';
+  const status = cardEl.querySelector('.status-badge')?.textContent || '';
+  const elapsed = cardEl.querySelector('.elapsed')?.textContent || '';
+  panel.innerHTML = `<div class="detail-view">
+    <div class="detail-meta">
+      ${status ? `<span><strong>Status:</strong> ${status}</span>` : ''}
+      ${backend ? `<span><strong>Backend:</strong> ${backend}</span>` : ''}
+      ${elapsed ? `<span><strong>Elapsed:</strong> ${elapsed}</span>` : ''}
+    </div>
+    <div class="detail-body"></div>
+  </div>`;
+  panel.querySelector('.detail-body').textContent = prompt;
+}
+
+// Stub — kept for backward compat but not needed with always-on detail panel
+function closeDetail() {
+  document.querySelectorAll('.session-card.selected').forEach(el => el.classList.remove('selected'));
+  const titleEl = document.getElementById('detail-panel-title');
+  if (titleEl) titleEl.textContent = 'Session Detail';
+  const panel = document.getElementById('tool-calls-panel');
+  if (panel) panel.innerHTML = '<div class="empty-state">Click a session or task to see full details</div>';
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetail(); });
+
+
 
 // ============================================================
 // Actions
@@ -790,7 +1150,6 @@ function updatePartialInstallLayout() {
   const servicesRow = document.getElementById('services-row');
   const showAllLink = footer.querySelector('.show-all-link');
 
-  // Show/hide footer
   if (collapsed.length > 0 && !state.showAll) {
     const names = collapsed.join(', ');
     msg.textContent = `${collapsed.length} additional server${collapsed.length > 1 ? 's' : ''} not detected (${names}) ·`;
@@ -800,7 +1159,6 @@ function updatePartialInstallLayout() {
     footer.classList.remove('visible');
   }
 
-  // Hide services-row entirely when both hands and workflow are collapsed
   const handsCollapsed = !state.showAll && state.collapsedNeverSeen.hands;
   const workflowCollapsed = !state.showAll && state.collapsedNeverSeen.workflow;
   if (handsCollapsed && workflowCollapsed) {
