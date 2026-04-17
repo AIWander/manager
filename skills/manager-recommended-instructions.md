@@ -34,16 +34,12 @@ If a task fails:
 Never manually clean up failed delegation output without checking
 `task_rollback` first.
 
-### Post-Delegation Extraction
-After any delegated task completes, scan the output for:
-- **Corrections:** The backend fixed something unexpected
-- **Decisions:** The backend made a non-obvious architectural choice
-- **Discoveries:** The backend found a bug, pattern, or constraint
+### Post-Delegation Review
+After any delegated task completes, scan the output for corrections,
+non-obvious architectural decisions, and discovered bugs or constraints.
+Capture anything worth reusing in your project notes.
 
-If the finding passes the 3Q gate (Reusable? Specific? New?), extract it
-to the knowledge base. Delegation without extraction loses half the value.
-
-### Task Health (v1.1.1)
+### Task Health
 - Read `health` on `task_status`, not `stall_detected`. `health` is an enum:
   `done`, `failed`, `queued`, `cancelled`, `paused`, `running_long_tool`,
   `stalled`, `idle`, `running`. `stall_detected` is legacy.

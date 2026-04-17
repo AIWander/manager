@@ -9,152 +9,117 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
-## What's New in v1.2.6
+## What's New in v1.3.0
 
-**Session notification hooks — get a Windows toast when a session completes, fails, or is destroyed.**
+**StdinMode v2, stall watchdog, and Dashboard v1.3.**
 
-Five new optional parameters on `session_start`:
+### StdinMode v2 — Stdin Handling Fix
 
-```json
-{
-  "tool": "session_start",
-  "arguments": {
-    "prompt": "Build the auth module",
-    "working_dir": "C:\\my-project",
-    "notify_on_complete": true,
-    "notify_on_fail": true,
-    "notify_on_destroy": false,
-    "notify_title": "Auth module done",
-    "notify_body": "Check C:\\my-project for results"
-  }
-}
-```
+New `StdinMode` enum (`Null` / `Piped`) controls child process stdin. One-shot
+tasks get `Stdio::null()` (immediate EOF), sessions get `Stdio::piped()` for
+`send()` follow-ups. Resolves stdin reader block that caused task startup stalls
+on Windows when multiple backends competed for stdio.
 
-All flags default to `false`. Omitting them entirely is equivalent to the old behavior — no change for existing callers.
+Reader cleanup hardened: sequential `child.wait()` then 5-second timeout on
+reader drain prevents indefinite hang on Windows pipe close.
 
-The flags are persisted to `meta.json` at session creation so they survive manager restarts. If manager is killed while a session runs, the heartbeat will still fire the correct toast when it detects the session ended.
+### Stall Watchdog
 
----
+`TaskStatus::Stalled` state for tasks with no output for
+`MANAGER_STALL_TIMEOUT_SECS`. Transitions back to `Running` automatically if
+output resumes. Surfaced in `task_poll` and dashboard.
 
-## What's New in v1.2.1
+### Dashboard v1.3
 
-**Notify tool and watchdog scope fixes.**
+- **Breadcrumb progress bar** — visual step tracking in the dashboard
+- **Voice health dot** — at-a-glance server status indicator
+- **Click-to-detail panel** — click any session/task card to see full prompt and output
+- **2 Hz render cap** — smooth, efficient DOM updates
+- **pollServer guard** — prevents runaway polling for unconfigured servers
 
-- **`notify`** — Windows toast notifications with title, body, icon (info/warning/error), and configurable duration. Use for background task completion alerts and status updates.
-- **Watchdog scope fixes** — improved process-tree detection edge cases.
+### New Task Fields
 
----
+| Field | Description |
+|-------|-------------|
+| `live_activity` | Per-task process tree snapshot (pid, name, cmd_preview, cpu_percent) |
+| `recent_tool_calls` | Last 50 tool calls with timestamps and duration (credentials redacted) |
+| `label` | Optional human-readable label for tasks, shown in dashboard and `task_list` |
+| `current_step` / `total_steps` / `current_step_desc` | Step progress tracking |
+| `effort` | Optional effort estimate on task submission |
 
-## What's New in v1.2.3
-
-**Real cancel-kill, output-as-timer async model, status_bar, and fingerprint dedup.**
-
-### 1. Fixed: task_cancel and session_destroy now kill the full process tree
-
-Previously, cancellation only updated the task status in the database — the
-background child process (and any descendants it spawned) kept running.
-v1.2.3 uses `sysinfo` to walk the process tree via parent-child relationships,
-kills descendants bottom-up, then kills the root. Response includes
-`killed_tree: [pids]` and drops the "may still be running" disclaimer on success.
-
-`session_destroy` applies the same tree-kill logic to sessions.
-
-### 2. Changed: Output-as-timer async model (removed wait=true / timeout_secs enforcement)
-
-`wait=true` previously blocked the MCP handler thread polling every 500ms —
-dangerous for long tasks and a deadlock vector. `timeout_secs` killed tasks
-that were still actively working. Both removed. `task_submit` now always
-returns immediately. The `timeout_secs` parameter is retained as
-`estimated_secs` (informational only, no enforcement).
-
-Use `task_poll` or `task_watch` to monitor progress.
-
-### 3. Added: task_poll
-
-Returns `{ completed_since: [...], still_running: [...], status_bar: {...} }`.
-`since` parameter defaults to 1 hour ago. Replaces the blocking `wait=true`
-pattern with an explicit, non-blocking poll.
-
-### 4. Added: status_bar
-
-One-line system summary: `{ manager: "N running, M queued, K unclaimed",
-breadcrumb: "...", loaf: "...", formatted: "one-line string" }`. Queries
-autonomous breadcrumb JSONL and active Project Loaf. Returns `"unavailable"`
-for unreachable sources — never errors.
-
-### 5. Added: Fingerprint dedup with stalled-session override
-
-Before queuing, computes `fingerprint = hash(backend, prompt[:200],
-working_dir)`. Active duplicate within 120s → rejected with
-`{ status: "duplicate", existing_task_id }`. Stalled match (no activity 120s+)
-→ new submission allowed, old task marked `superseded_by: <new_id>`.
-`allow_duplicate: bool` param on both `task_submit` and `session_start`.
-New task fields: `fingerprint`, `superseded_by`. New filter: `include_stalled`
-on `task_list` and `session_list`.
-
-### 6. Fixed: Session heartbeat — alive/pid now tracked correctly
-
-Async 30s loop syncs `child_pid` and `alive` from the task store into
-`meta.json`. `session_list` now returns authoritative `alive`/`pid`/
-`last_activity` fields. Fixes bug where `session_list` always reported
-`alive: false, pid: null` for live sessions.
-
-### v1.2.0 ghost-task fix still present
-
-Startup PID liveness check, named-pipe singleton, and zombie reaper from
-v1.2.0 remain in effect. See changelog for details.
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
 
-## What's New in v1.1.1
+<details>
+<summary>Older Releases</summary>
 
-### 1. `task_rerun` now documented
+### v1.2.8 — Operational Dashboard
 
-Re-submit a completed task with tweaked context, file injection, or backend
-override. The new task links back to the original via `parent_task_id`.
-Use this instead of writing a new prompt from scratch when a completed task
-needs another pass.
+- `GET /` serves a dark-theme single-file HTML dashboard polling all servers
+- `GET /api/status` — rich JSON endpoint with session counts, task details, loaf state
+- `GET /api/config` — port assignments and poll intervals
+- `live_status.json` writer for cross-device visibility
+- `dashboard_open`, `dashboard_stop`, `dashboard_status` MCP tools
+- Port fallback (9100–9105) with `127.0.0.1` binding
 
-### 2. Stall detector fix
+### v1.2.7 — Multi-Breadcrumb Status Bar + Session Orphan Detection
 
-The stall detector threshold has been raised from **30 seconds to 90 seconds**.
-Additionally, the detector now **skips entirely** when a backend tool is
-mid-flight (`active_tool_running == true`). This eliminates false positives
-on long Write/Edit operations that previously triggered stall warnings after
-just 30 seconds of no visible step updates.
+- `status_bar` shows count + per-project breakdown for multiple active breadcrumbs
+- Session `orphaned` status when manager restarts with live child processes
+- `license = "Apache-2.0"` metadata in Cargo.toml
+- Two-Tier Storage docs in `per_machine_setup.md`
 
-### 3. `health` enum on `task_status`
+### v1.2.6 — Session Notification Hooks
 
-New `health` field replaces `stall_detected` as the field to read for
-behavior decisions. Nine values:
+Five new optional parameters on `session_start`: `notify_on_complete`,
+`notify_on_fail`, `notify_on_destroy`, `notify_title`, `notify_body`. All
+default to false. Flags persist to `meta.json` and survive manager restarts.
 
-| Value | Meaning |
-|-------|---------|
-| `done` | Task completed successfully |
-| `failed` | Task failed |
-| `queued` | Waiting to be picked up |
-| `cancelled` | Cancelled by user or system |
-| `paused` | Paused by user |
-| `running_long_tool` | Backend tool is mid-flight — keep waiting |
-| `stalled` | No activity beyond threshold — actually stuck |
-| `idle` | Session open but no active work |
-| `running` | Normal execution in progress |
+### v1.2.5 — Per-Server Learning Loop
 
-`stall_detected` remains for backward compatibility but `health` is strictly
-more expressive.
+- `run_analyzer` tool — nightly task performance analyzer with promotion/demotion proposals
 
-### 4. `active_tool_running` on `task_status`
+### v1.2.3 — Cancel-Kill, Output-as-Timer, Status Bar, Fingerprint Dedup
 
-Boolean field — `true` when the backend's most recent step has a `"started"`
-event with no completion event yet. A tool is mid-flight. This is what the
-stall detector reads to decide whether to skip.
+- `task_cancel` and `session_destroy` now kill the full process tree
+- Removed `wait=true` blocking and `timeout_secs` enforcement
+- `task_poll` — non-blocking completion polling with status bar
+- `status_bar` — one-line system summary
+- Fingerprint dedup with stalled-session override
+- Session heartbeat with live `alive`/`pid`/`last_activity` fields
 
-### 5. Task lineage scaffolding
+### v1.2.1 — Notify + Watchdog Fixes
 
-Three new fields on task records: `parent_task_id`, `forked_from`, and
-`continuation_of`. Only `parent_task_id` is populated today (set automatically
-by `task_rerun` via the `rerun_of` relationship). Fork and continuation
-handlers are planned for a follow-up release.
+- `notify` tool — Windows toast notifications
+- Watchdog scope fixes for process-tree detection
+
+### v1.2.0 — Ghost-Task Fix
+
+- Tasks with live child PIDs survive manager restart instead of being force-failed
+- `child_pid` and `watchdog_observations` fields on task records
+- Named-pipe singleton architecture
+- Zombie reaper on startup
+
+### v1.1.1 — task_rerun, Health Enum, Stall Fix
+
+- `task_rerun` — re-submit completed tasks with modifications
+- `health` enum (9 values) replaces `stall_detected`
+- `active_tool_running` boolean on `task_status`
+- Stall detector threshold raised to 90s, skips mid-flight tools
+- Task lineage fields: `parent_task_id`, `forked_from`, `continuation_of`
+
+### v1.1.0 — Initial Multi-Backend Release
+
+- Multi-backend orchestration (Claude Code, Codex, Gemini, GPT)
+- Auto-route, Project Loafs, `task_run_parallel`, `task_watch`
+- Archive-first backups, `get_analytics`, session tools, workflow templates
+
+### v1.0.0 — Initial Release
+
+- Claude Code backend support, basic task lifecycle
+
+</details>
 
 ---
 
@@ -169,7 +134,7 @@ budgets — let them write code.
 
 | Backend | Status | Best For |
 |---------|--------|----------|
-| **Claude Code** | Full support | Multi-step toolchains, iterative implementation, complex refactors — the primary backend in v1.2.3 |
+| **Claude Code** | Full support | Multi-step toolchains, iterative implementation, complex refactors — the primary backend |
 | **GPT** | Full support | Pure reasoning chains, structured output, classification |
 | **Codex** | Compatibility — beta | One-shot script generation. Full functionality planned for v2. |
 | **Gemini CLI** | Compatibility — beta | One-shot Q&A, large-context analysis. Full functionality planned for v2. |
@@ -226,10 +191,10 @@ See `claude_desktop_config.example.json` for ARM64 + x64 paths.
 
 ### Download
 
-Grab the latest binary from the [v1.2.3 release](https://github.com/josephwander-arch/manager/releases/tag/v1.2.3):
+Grab the latest binary from the [v1.3.0 release](https://github.com/josephwander-arch/manager/releases/tag/v1.3.0):
 
-- `manager-v1.2.3-x64.exe` — Windows x64
-- `manager-v1.2.3-arm64.exe` — Windows ARM64
+- `manager_v1.3.0_windows_x64.exe` — Windows x64
+- `manager_v1.3.0_windows_arm64.exe` — Windows ARM64
 
 Place the `.exe` in your MCP server directory and register its path in your client config.
 
@@ -262,14 +227,14 @@ task_submit(
 `task_submit` always returns immediately — use `task_poll` or `task_watch` to
 monitor progress.
 
-### Poll for completions (new in v1.2.3)
+### Poll for completions
 
 ```
 task_poll(since="2026-04-14T10:00:00Z")
 # Returns: { completed_since: [...], still_running: [...], status_bar: {...} }
 ```
 
-### Re-run with tweaks (new in v1.1.1)
+### Re-run with tweaks
 
 ```
 task_rerun(
@@ -279,7 +244,7 @@ task_rerun(
 )
 ```
 
-### Check task health (new in v1.1.1)
+### Check task health
 
 ```
 status = task_status(task_id="task_abc123")
@@ -318,7 +283,7 @@ task_watch(task_ids=["task_1", "task_2"], timeout=600)
 | `task_submit` | Submit a one-shot task to a backend (always returns immediately) |
 | `task_status` | Check task state, health, and active_tool_running |
 | `task_watch` | Server-side block until tasks complete |
-| `task_poll` | Poll completions since a timestamp + status_bar summary (new v1.2.3) |
+| `task_poll` | Poll completions since a timestamp + status_bar summary |
 | `task_output` | Retrieve full output of a completed task |
 | `task_cancel` | Cancel a running or pending task (kills process tree) |
 | `task_retry` | Re-run a failed task with error context injected |
@@ -339,7 +304,7 @@ task_watch(task_ids=["task_1", "task_2"], timeout=600)
 | `session_start` | Start a persistent multi-turn session (fingerprint dedup, heartbeat, notify hooks) |
 | `session_send` | Send a message to an active session |
 | `session_list` | List active sessions with live alive/pid fields |
-| `session_destroy` | Kill session process tree and mark cancelled (new v1.2.3) |
+| `session_destroy` | Kill session process tree and mark cancelled |
 
 ### Direct Backend Tools
 
@@ -373,8 +338,8 @@ task_watch(task_ids=["task_1", "task_2"], timeout=600)
 
 | Tool | Purpose |
 |------|---------|
-| `status_bar` | One-line system summary: manager + breadcrumb + loaf (new v1.2.3) |
-| `notify` | Windows toast notification with title, body, icon, duration (new v1.2.1) |
+| `status_bar` | One-line system summary: manager + breadcrumb + loaf |
+| `notify` | Windows toast notification with title, body, icon, duration |
 | `get_analytics` | Query historical task performance data |
 | `configure` | Update manager settings at runtime |
 | `role_create` | Define a named backend role |

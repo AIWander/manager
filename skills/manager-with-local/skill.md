@@ -115,7 +115,7 @@ Pattern: `<verb> <what> | targets: <file1>, <file2>, ...`
 **Good:**
 ```
 "Refactor auth → JWT | targets: src/auth/jwt.py, src/auth/session.py, tests/test_auth.py"
-"Deploy autonomous.exe v2.4 | targets: C:\CPC\servers\autonomous.exe"
+"Deploy server v2.4 | targets: servers/my-server.exe"
 "Add WebSocket support | targets: src/tools/websocket.rs, src/main.rs, Cargo.toml"
 ```
 
