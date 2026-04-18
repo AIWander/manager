@@ -2,6 +2,14 @@
 
 All notable changes to the Manager MCP Server are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **GitHub Actions release workflow** — `v*` tag push builds x64 (windows-latest) + ARM64 (windows-11-arm native) binaries, attaches to draft release as `manager-vX.Y.Z-x64.exe` / `manager-vX.Y.Z-aarch64.exe`.
+- **SECURITY.md** — security policy and reporting instructions.
+- **Platform-split install docs** — README install section split into self-contained Windows x64 and ARM64 sub-sections.
+
 ## [1.3.6] - 2026-04-17
 
 ### Changed

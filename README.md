@@ -120,19 +120,43 @@ budgets — let them write code.
 
 ---
 
-## Installation & Per-Machine Setup
+## Install
 
-This is a standalone Rust MCP server for Claude Desktop / Claude Code. Each machine that runs the server needs its own copy of the binary plus a few config tweaks.
+### Windows x64
 
-**Quick install:**
-1. Download the right binary from [Releases](https://github.com/josephwander-arch/manager/releases) — `_arm64.exe` for Windows ARM64, `_x64.exe` for x64.
-2. Copy to `C:\CPC\servers\manager.exe`.
-3. Edit `%APPDATA%\Claude\claude_desktop_config.json` — paste the snippet from [`claude_desktop_config.example.json`](./claude_desktop_config.example.json) into your `mcpServers` object.
+1. Download `manager-v1.3.6-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
+3. Add to your `claude_desktop_config.json`:
+   ```json
+   {
+     "mcpServers": {
+       "manager": {
+         "command": "%LOCALAPPDATA%\\CPC\\servers\\manager.exe"
+       }
+     }
+   }
+   ```
 4. Restart Claude Desktop.
 
-For full per-machine setup (paths, backend CLI auth, toast notifications), see [`docs/per_machine_setup.md`](./docs/per_machine_setup.md).
+---
 
-A future `cpc-setup.exe` helper will automate this entire process.
+### Windows ARM64
+
+1. Download `manager-v1.3.6-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
+3. Add to your `claude_desktop_config.json`:
+   ```json
+   {
+     "mcpServers": {
+       "manager": {
+         "command": "%LOCALAPPDATA%\\CPC\\servers\\manager.exe"
+       }
+     }
+   }
+   ```
+4. Restart Claude Desktop.
+
+---
 
 ### Prerequisites
 
@@ -142,31 +166,7 @@ A future `cpc-setup.exe` helper will automate this entire process.
   - **Gemini**: `gemini` CLI or `GEMINI_API_KEY`
   - **GPT**: `OPENAI_API_KEY`
 
-### Claude Desktop Configuration
-
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "manager": {
-      "command": "C:\\CPC\\servers\\manager.exe",
-      "args": []
-    }
-  }
-}
-```
-
-See `claude_desktop_config.example.json` for ARM64 + x64 paths.
-
-### Download
-
-Grab the latest binary from the [v1.3.0 release](https://github.com/josephwander-arch/manager/releases/tag/v1.3.0):
-
-- `manager_v1.3.0_windows_x64.exe` — Windows x64
-- `manager_v1.3.0_windows_arm64.exe` — Windows ARM64
-
-Place the `.exe` in your MCP server directory and register its path in your client config.
+For full per-machine setup (paths, backend CLI auth, toast notifications), see [`docs/per_machine_setup.md`](./docs/per_machine_setup.md).
 
 ### Build from Source
 
@@ -177,16 +177,6 @@ cargo build --release
 ```
 
 Binary appears at `target/release/manager.exe`. Requires Rust stable toolchain — nightly is not required.
-
-### Verify Installation
-
-Run the included doctor script:
-
-```powershell
-.\doctor.ps1
-```
-
-This checks the binary, backend availability, and task state directory.
 
 ---
 
