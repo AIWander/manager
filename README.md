@@ -359,4 +359,4 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 Joseph Wander
 - GitHub: [github.com/josephwander-arch](https://github.com/josephwander-arch/)
-- Email: protipsinc@gmail.com
+- Email: josephwander@gmail.com
