@@ -11,11 +11,13 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 ---
 
-## What's New in v1.3.6
+## What's New in v1.3.7
 
-**Clippy cleanup release.** Removed blanket `#![allow(clippy::all)]` from crate root.
-Targeted fixes across `main.rs` and `analyzer.rs` -- `sort_by` to `sort_by_key` rewrites
-for Rust 1.95+ compatibility, plus additional lint fixes throughout.
+**Dashboard quick-wins bundle.** Three new dashboard features:
+
+- **Live step counter** -- task cards show `[N/M]` tool-step progress parsed from the `steps[]` array
+- **Cross-server last-5-tools** -- bottom strip merges tool calls from all servers via log tailing + API polling
+- **Pending-swap counter** -- scorecard shows how many `.new` binaries await manual deploy swap
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 

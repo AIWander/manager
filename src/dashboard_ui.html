@@ -398,7 +398,7 @@ body.no-services .panel-body { max-height: 520px; }
     <div class="zone-body" id="zone-completed-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
   <div class="zone-card">
-    <div class="zone-title">Last 6 Tools</div>
+    <div class="zone-title">Last 5 Tools</div>
     <div class="zone-body" id="zone-tools-body"><span style="color:var(--text-secondary)">—</span></div>
   </div>
 </div>
@@ -645,6 +645,8 @@ function renderSessions() {
       const stepDesc = t.current_step_desc ? `: ${t.current_step_desc}` : '';
       const linesNote = t.progress_lines ? ` · ${t.progress_lines} lines` : '';
       stepsInfo = `Step ${t.current_step}/${t.total_steps}${stepDesc}${linesNote}`;
+    } else if (t.step_count > 0) {
+      stepsInfo = `[${t.steps_completed || 0}/${t.step_count}]`;
     } else if (t.progress_lines) {
       stepsInfo = `${t.progress_lines} output lines`;
     }
@@ -658,7 +660,7 @@ function renderSessions() {
       labelChipHtml = `<div class="session-label-chip" style="background:${color}22;color:${color};border-color:${color}55">${escHtml(t.label)}</div>`;
     }
 
-    // Step progress bar (from manager's [STEP n/N] parser or breadcrumb data)
+    // Step progress bar (from manager's [STEP n/N] parser, task steps[] array, or activity)
     let stepProgressHtml = '';
     if (t.current_step != null && t.total_steps != null && t.total_steps > 0) {
       const pct = Math.round(t.current_step / t.total_steps * 100);
@@ -666,6 +668,13 @@ function renderSessions() {
       stepProgressHtml = `<div class="step-progress">
         <div class="step-progress-bar"><div class="step-progress-fill" style="width:${pct}%"></div></div>
         <div class="step-progress-label">${t.current_step}/${t.total_steps}${desc}</div>
+      </div>`;
+    } else if (t.step_count > 0) {
+      const done = t.steps_completed || 0;
+      const pct = Math.round(done / t.step_count * 100);
+      stepProgressHtml = `<div class="step-progress">
+        <div class="step-progress-bar"><div class="step-progress-fill" style="width:${pct}%"></div></div>
+        <div class="step-progress-label">[${done}/${t.step_count}] tool steps</div>
       </div>`;
     } else if (t.status === 'running' && t.progress_lines > 0) {
       // No discrete steps but task is active — show activity indicator
@@ -817,51 +826,54 @@ function renderBottomStrip() {
     compBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px">—</span>';
   }
 
-  // Zone 4: Last 6 Tools (aggregated from all polled servers)
+  // Zone 4: Last 5 Tools (cross-server: manager API log-tail + polled servers)
   const toolsBody = document.getElementById('zone-tools-body');
   const allCalls = [];
+  // Source 1: cross_server_recent_tools from manager (log-tailed + ring buffer)
+  if (mdata?.cross_server_recent_tools) {
+    mdata.cross_server_recent_tools.forEach(c => allCalls.push({
+      _server: c.server || 'manager',
+      tool_name: c.tool || c.tool_name || '?',
+      timestamp_utc: c.timestamp || c.timestamp_utc || '',
+      duration_ms: c.duration_ms,
+    }));
+  }
+  // Source 2: polled servers' recent_tool_calls (catches hands/local/workflow live data)
   for (const [sname, sdata] of Object.entries(state.servers)) {
+    if (sname === 'manager') continue; // already covered by cross_server_recent_tools
     if (sdata?.recent_tool_calls) {
       sdata.recent_tool_calls.forEach(c => allCalls.push({...c, _server: sname}));
     }
   }
   const seenTc = new Set();
   const dedupedTc = allCalls.filter(c => {
-    const key = `${c.tool_name}|${c.timestamp_utc}`;
+    const key = `${c._server}|${c.tool_name}|${c.timestamp_utc}`;
     if (seenTc.has(key)) return false;
     seenTc.add(key);
     return true;
   });
-  dedupedTc.sort((a, b) => new Date(b.timestamp_utc) - new Date(a.timestamp_utc));
-  const top6 = dedupedTc.slice(0, 6);
+  dedupedTc.sort((a, b) => (b.timestamp_utc || '').localeCompare(a.timestamp_utc || ''));
+  const top5 = dedupedTc.slice(0, 5);
 
-  if (top6.length === 0) {
+  if (top5.length === 0) {
     toolsBody.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;font-style:italic">No tool calls yet</span>';
   } else {
     const nowMs = Date.now();
-    toolsBody.innerHTML = top6.map((c, idx) => {
+    toolsBody.innerHTML = top5.map((c, idx) => {
       const ts = new Date(c.timestamp_utc);
-      // Relative timestamp
-      let relTime = '';
+      // HH:MM:SS absolute time
+      let timeStr = '';
       if (!isNaN(ts.getTime())) {
-        const ago = Math.floor((nowMs - ts.getTime()) / 1000);
-        relTime = ago < 5 ? 'now' : ago < 60 ? `${ago}s` : ago < 3600 ? `${Math.floor(ago/60)}m` : `${Math.floor(ago/3600)}h`;
+        timeStr = ts.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
       }
       const durStr = c.duration_ms != null ? `${c.duration_ms}ms` : '';
-      // Input preview — first 20 chars of input/arguments
-      const inputRaw = c.input_preview || c.input || (c.arguments ? JSON.stringify(c.arguments).slice(0,20) : '');
-      const inputPrev = inputRaw.length > 20 ? inputRaw.slice(0, 17) + '...' : inputRaw;
-      // Currently executing: first entry with no duration (still running)
       const isCurrent = idx === 0 && c.duration_ms == null;
       const rowClass = isCurrent ? 'tc-row tc-current' : 'tc-row';
-      const statusIcon = c.duration_ms != null ? (c.error ? '<span style="color:var(--accent-red)">&#10007;</span>' : '<span style="color:var(--accent-green)">&#10003;</span>') : '<span style="color:var(--accent-blue)">&#9654;</span>';
       return `<div class="${rowClass}">
-        <span style="color:var(--text-secondary);font-size:10px;min-width:24px;text-align:right">${relTime}</span>
+        <span class="tc-meta" style="min-width:52px">${timeStr}</span>
         <span style="color:var(--accent-purple);font-size:9px;min-width:44px">${escHtml(c._server)}</span>
         <span class="tc-name" title="${escHtml(c.tool_name)}">${escHtml(c.tool_name)}</span>
-        ${inputPrev ? `<span style="color:var(--text-secondary);font-size:9px;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(inputRaw)}">${escHtml(inputPrev)}</span>` : ''}
         ${durStr ? `<span class="tc-dur">${durStr}</span>` : ''}
-        ${statusIcon}
       </div>`;
     }).join('');
   }
@@ -896,6 +908,9 @@ function renderScorecard() {
     }).length;
   }
 
+  // Pending exe swaps
+  const pendingSwaps = mdata?.pending_swaps ?? 0;
+
   const items = [
     { label: 'Running', value: running, cls: running > 0 ? 'good' : '' },
     { label: 'Done today', value: done, cls: done > 0 ? 'good' : '' },
@@ -903,6 +918,7 @@ function renderScorecard() {
     { label: 'Orphaned', value: orphaned, cls: orphaned > 0 ? 'warn' : '' },
     { label: 'Extractions', value: extractions, cls: extractions > 0 ? 'good' : '' },
     { label: 'BC Complete', value: bcCompleteToday, cls: bcCompleteToday > 0 ? 'good' : '' },
+    { label: 'Pending Swaps', value: pendingSwaps, cls: pendingSwaps > 0 ? 'warn' : '' },
   ];
 
   grid.innerHTML = items.map(i =>

@@ -8241,6 +8241,8 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
                 "current_step": t.current_step,
                 "total_steps": t.total_steps,
                 "current_step_desc": t.current_step_desc,
+                "step_count": t.steps.len(),
+                "steps_completed": t.steps.iter().filter(|s| s.status == "completed").count(),
                 "live_activity": t.live_activity,
             })
         })
@@ -8261,8 +8263,44 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
             .collect()
     };
 
+    // Cross-server tools: merge manager ring buffer with mcp_activity.jsonl tail
+    let activity_log = tail_mcp_activity_log(20);
+    let mut cross_tools: Vec<Value> = recent_calls
+        .iter()
+        .map(|c| {
+            json!({
+                "server": "manager",
+                "tool": c.tool_name,
+                "timestamp": c.timestamp_utc,
+                "duration_ms": c.duration_ms,
+            })
+        })
+        .collect();
+    for entry in &activity_log {
+        cross_tools.push(entry.clone());
+    }
+    // Sort descending by timestamp, dedup by (server, tool, timestamp), take 5
+    cross_tools.sort_by(|a, b| {
+        let ta = a.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let tb = b.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        tb.cmp(ta)
+    });
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    cross_tools.retain(|c| {
+        let key = format!(
+            "{}|{}|{}",
+            c.get("server").and_then(|v| v.as_str()).unwrap_or(""),
+            c.get("tool").and_then(|v| v.as_str()).unwrap_or(""),
+            c.get("timestamp").and_then(|v| v.as_str()).unwrap_or("")
+        );
+        seen_keys.insert(key)
+    });
+    cross_tools.truncate(5);
+
+    let pending_swaps = count_pending_swaps();
+
     Json(json!({
-        "version": "1.3.0",
+        "version": "1.3.7",
         "sessions": {
             "running": running,
             "queued": queued,
@@ -8275,6 +8313,8 @@ async fn dash_api_status(State(st): State<DashboardState>) -> Json<Value> {
         "loaf": loaf,
         "status_bar": status_bar,
         "recent_tool_calls": recent_calls,
+        "cross_server_recent_tools": cross_tools,
+        "pending_swaps": pending_swaps,
         "timestamp": Utc::now().to_rfc3339(),
     }))
 }
@@ -8297,13 +8337,42 @@ async fn dash_api_config() -> Json<Value> {
             "workflow":   42000u32,
             "autonomous": 42000u32,
         },
-        "version": "1.3.0",
+        "version": "1.3.7",
     }))
 }
 
 /// Resolve Volumes path from env or default.
 fn volumes_path() -> String {
     std::env::var("CPC_VOLUMES_DIR").unwrap_or_else(|_| r"C:\My Drive\Volumes".to_string())
+}
+
+/// Tail the last `n` lines of `C:\CPC\logs\mcp_activity.jsonl` and return parsed entries.
+/// Each entry has {server, tool, timestamp, duration_ms, status}.
+/// Returns an empty vec on any IO or parse error (non-blocking).
+fn tail_mcp_activity_log(n: usize) -> Vec<Value> {
+    let path = std::env::var("CPC_LOGS_DIR").unwrap_or_else(|_| r"C:\CPC\logs".to_string());
+    let filepath = format!(r"{}\mcp_activity.jsonl", path);
+    let Ok(content) = std::fs::read_to_string(&filepath) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .rev()
+        .take(n)
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+/// Count `.new` files in `C:\CPC\servers\` for the pending-swap widget.
+fn count_pending_swaps() -> usize {
+    let dir = std::env::var("CPC_SERVERS_DIR").unwrap_or_else(|_| r"C:\CPC\servers".to_string());
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "new"))
+        .count()
 }
 
 /// Fetch /api/status from a server on localhost. Returns None if unreachable.

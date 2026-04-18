@@ -4,11 +4,16 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-04-17
+
 ### Added
 
-- **GitHub Actions release workflow** — `v*` tag push builds x64 (windows-latest) + ARM64 (windows-11-arm native) binaries, attaches to draft release as `manager-vX.Y.Z-x64.exe` / `manager-vX.Y.Z-aarch64.exe`.
-- **SECURITY.md** — security policy and reporting instructions.
-- **Platform-split install docs** — README install section split into self-contained Windows x64 and ARM64 sub-sections.
+- **Live step counter** -- Task cards now show a `[N/M]` tool-step counter parsed from each task's `steps[]` array, replacing the static progress bar for tasks without `[STEP n/N]` output markers. Updates on every dashboard poll tick.
+- **Cross-server last-5-tools widget** -- Bottom strip Zone 4 now merges manager's ring buffer with a log-tailed `mcp_activity.jsonl` (autonomous entries) plus polled `recent_tool_calls` from all other servers. Shows newest 5 entries in `HH:MM:SS | server | tool_name` format. Purely read-only log tailing, zero latency impact on tool calls.
+- **Pending-exe-swap counter** -- Scorecard widget counts `.new` files in the servers directory. Shows "Pending Swaps: N" so you know how many deploy swaps are waiting.
+- **GitHub Actions release workflow** -- `v*` tag push builds x64 (windows-latest) + ARM64 (windows-11-arm native) binaries, attaches to draft release as `manager-vX.Y.Z-x64.exe` / `manager-vX.Y.Z-aarch64.exe`.
+- **SECURITY.md** -- security policy and reporting instructions.
+- **Platform-split install docs** -- README install section split into self-contained Windows x64 and ARM64 sub-sections.
 
 ## [1.3.6] - 2026-04-17
 
@@ -138,15 +143,13 @@ All notable changes to the Manager MCP Server are documented here.
 
 - `handle_list_sessions` response now includes `"orphaned": bool` field (always present, non-breaking).
 
-## [Unreleased]
-
 ### Changed
 - Add legacy-fallback path resolution for session directory. Existing `C:\temp\manager-sessions\` (if present with session data) continues to be used; new installs use `cpc_paths::data_path("manager")` default.
 
 ### Added
-- **`cpc-paths` dependency** (v0.1.0) — portable path discovery library added as a git dep pinned to tag v0.1.0. No behavior change. Groundwork for future health/diagnostic integration.
+- **`cpc-paths` dependency** (v0.1.0) -- portable path discovery library added as a git dep pinned to tag v0.1.0. No behavior change. Groundwork for future health/diagnostic integration.
 
-## [1.2.6] - 2026-04-15 — Session Notification Hooks
+## [1.2.6] - 2026-04-15 -- Session Notification Hooks
 
 ### Added
 
