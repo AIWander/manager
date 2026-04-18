@@ -3,6 +3,11 @@ name = "manager-mcp"
 version = "1.3.8"
 edition = "2021"
 license = "Apache-2.0"
+description = "Multi-AI delegation orchestrator MCP server - routes coding tasks across Claude Code, Codex, and Gemini with retry, rollback, and dashboard"
+repository = "https://github.com/josephwander-arch/manager"
+readme = "README.md"
+keywords = ["cpc", "mcp", "orchestrator", "delegation", "ai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "manager"
