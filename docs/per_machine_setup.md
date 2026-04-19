@@ -85,7 +85,7 @@ Override: `CPC_MANAGER_DATA_DIR` env var.
 
 ### Legacy paths
 
-If you already have data at `C:\CPC\` (Joe-style install), it keeps working. Manager's legacy-fallback logic checks `C:\temp\manager-sessions\` first; if it contains session data it stays there. New installs use the cpc-paths default (`%LOCALAPPDATA%\CPC\data\manager-data\`). No migration needed.
+If you already have data at `C:\CPC\` (legacy install), it keeps working. Manager's legacy-fallback logic checks `C:\temp\manager-sessions\` first; if it contains session data it stays there. New installs use the cpc-paths default (`%LOCALAPPDATA%\CPC\data\manager-data\`). No migration needed.
 
 ### Setting up a second machine
 
