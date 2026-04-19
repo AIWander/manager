@@ -9,3 +9,6 @@ Thumbs.db
 .idea/
 .vscode/
 .env
+*.pre_merge_*
+*.pre_dashfix_*
+*.pre_phaseD_*

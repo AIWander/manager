@@ -960,17 +960,22 @@ function renderScorecard() {
   const orphaned = sessions.orphaned || 0;
 
   // Extractions today — prefer autonomous, fallback to manager/local
-  const extractions = adata?.extractions_today ?? mdata?.extractions_today ?? ldata?.extractions_today ?? 0;
+  const extractions = adata?.extractions_today ?? mdata?.extractions_today ?? ldata?.extractions_today ?? '—';
 
-  // Breadcrumbs completed today — from local breadcrumb data
+  // Breadcrumbs completed today — prefer local's pre-computed archive_today_count
   let bcCompleteToday = 0;
   if (ldata?.breadcrumbs) {
-    const bcAll = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.completed ?? ldata.breadcrumbs.active ?? []);
-    const todayStr = new Date().toISOString().slice(0, 10);
-    bcCompleteToday = bcAll.filter(b => {
-      const cd = b.completed_at || b.completion_date || '';
-      return cd.startsWith(todayStr) && !b.aborted;
-    }).length;
+    if (typeof ldata.breadcrumbs.archive_today_count === 'number') {
+      bcCompleteToday = ldata.breadcrumbs.archive_today_count;
+    } else {
+      // Fallback: filter a completed array if the server exposes one
+      const bcAll = Array.isArray(ldata.breadcrumbs) ? ldata.breadcrumbs : (ldata.breadcrumbs.completed ?? ldata.breadcrumbs.active ?? []);
+      const todayStr = new Date().toISOString().slice(0, 10);
+      bcCompleteToday = bcAll.filter(b => {
+        const cd = b.completed_at || b.completion_date || '';
+        return cd.startsWith(todayStr) && !b.aborted;
+      }).length;
+    }
   }
 
   // Pending exe swaps
@@ -981,7 +986,7 @@ function renderScorecard() {
     { label: 'Done today', value: done, cls: done > 0 ? 'good' : '' },
     { label: 'Failed', value: failed, cls: failed > 0 ? 'warn' : '' },
     { label: 'Orphaned', value: orphaned, cls: orphaned > 0 ? 'warn' : '' },
-    { label: 'Extractions', value: extractions, cls: extractions > 0 ? 'good' : '' },
+    { label: 'Extractions', value: extractions, cls: (typeof extractions === 'number' && extractions > 0) ? 'good' : '' },
     { label: 'BC Complete', value: bcCompleteToday, cls: bcCompleteToday > 0 ? 'good' : '' },
     { label: 'Pending Swaps', value: pendingSwaps, cls: pendingSwaps > 0 ? 'warn' : '' },
   ];
