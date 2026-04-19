@@ -5,7 +5,7 @@ description: 'Getting started with Manager — the 48-tool multi-AI orchestrator
 
 ## What Manager Is
 
-A single MCP server (manager.exe) with 44 tools for multi-AI orchestration. It routes tasks to Claude Code, Codex, Gemini CLI, and GPT, with parallel execution, workflow chaining, and learned routing patterns.
+A single MCP server (manager.exe) with 48 tools for multi-AI orchestration. It routes tasks to Claude Code, Codex, Gemini CLI, and GPT, with parallel execution, workflow chaining, and learned routing patterns.
 
 | Category | Key Tools | What It Does |
 |----------|-----------|-------------|
