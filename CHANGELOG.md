@@ -4,6 +4,15 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.3.9] - 2026-04-19
+
+### Fixed
+
+- **Track 2: codex `--` defensive separator** — All 6 codex argument-building sites now insert `"--"` between CLI flags and the user prompt. Prevents prompts starting with `-` from being parsed as flags by codex CLI, which could cause silent argument mis-routing or exec failures.
+- **Option C: embedded-only dashboard** — Removed disk-override path from `dash_root()`. Dashboard HTML is now served exclusively from the compile-time `include_str!` embed. Eliminates the runtime divergence bug where a stale `C:\CPC\dashboard\dashboard.html` override could silently shadow the repo source.
+- **Dashboard counter: archive_today_count** — Breadcrumb scorecard now reads `archive_today_count` directly from the status payload instead of re-deriving it client-side (which could undercount).
+- **Dashboard counter: em-dash sentinel** — Extractions count shows `—` (em-dash) when the extraction endpoint is unreachable, instead of displaying a stale or zero count that could be mistaken for real data.
+
 ## [1.3.8] - 2026-04-18
 
 ### Added

@@ -1617,6 +1617,7 @@ fn spawn_retry_execution(
                 "--full-auto".into(),
                 "--cd".into(),
                 wd.clone(),
+                "--".into(),
                 prompt,
             ];
             handle.spawn(run_codex_task(tasks, tid, args, wd));
@@ -3117,6 +3118,7 @@ fn handle_submit_task(server: &Server, params: Value) -> Result<Value, String> {
                 "--full-auto".into(),
                 "--cd".into(),
                 wd.to_string(),
+                "--".into(),
                 prompt.clone(),
             ];
             vis_exe = Some(codex_cmd().to_string());
@@ -6691,6 +6693,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
                 "--full-auto".into(),
                 "--cd".into(),
                 wd.clone(),
+                "--".into(),
                 prompt_for_spawn,
             ];
             server
@@ -7967,6 +7970,7 @@ async fn dash_post_task(
                 "--full-auto".into(),
                 "--cd".into(),
                 wd.clone(),
+                "--".into(),
                 prompt,
             ];
             tokio::spawn(run_codex_task(tasks_bg, tid, args, wd));
@@ -8247,38 +8251,11 @@ async fn api_list_dir(Query(q): Query<PathQuery>) -> impl IntoResponse {
 
 /// GET / — serve embedded dashboard HTML
 async fn dash_root() -> impl IntoResponse {
-    // Embedded fallback — compiled into the binary as a safety net.
+    // Dashboard HTML is embedded at compile time. To update: edit
+    // src/dashboard_ui.html, rebuild manager, restart Claude Desktop.
+    // No disk-override path — prevents runtime HTML from diverging
+    // from the source in the repo (was a ship-blocker Apr 2026).
     const EMBEDDED_HTML: &str = include_str!("dashboard_ui.html");
-
-    // Try to load a live override from disk first so HTML/CSS/JS tweaks
-    // don't require a full Rust rebuild. Looks in %LOCALAPPDATA%\CPC\dashboard\dashboard.html
-    // falling back to C:\CPC\dashboard\dashboard.html.
-    let override_paths = [
-        std::env::var("LOCALAPPDATA")
-            .ok()
-            .map(|p| format!(r"{}\CPC\dashboard\dashboard.html", p)),
-        Some(r"C:\CPC\dashboard\dashboard.html".to_string()),
-    ];
-
-    let html_owned: String;
-    let html_ref: &str = {
-        let mut found = None;
-        for p in override_paths.iter().flatten() {
-            if std::path::Path::new(p).exists() {
-                if let Ok(content) = std::fs::read_to_string(p) {
-                    found = Some(content);
-                    break;
-                }
-            }
-        }
-        match found {
-            Some(s) => {
-                html_owned = s;
-                &html_owned
-            }
-            None => EMBEDDED_HTML,
-        }
-    };
 
     // Cache-Control: no-store so browsers never cache the dashboard HTML.
     // Ends the Ctrl+Shift+R dance for every dashboard iteration.
@@ -8291,7 +8268,7 @@ async fn dash_root() -> impl IntoResponse {
             (axum::http::header::PRAGMA, "no-cache"),
             (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
         ],
-        html_ref.to_string(),
+        EMBEDDED_HTML.to_string(),
     )
 }
 
@@ -10413,6 +10390,7 @@ fn handle_codex_exec(args: Value) -> Result<Value, String> {
     cmd.args(["--cd", working_dir]);
     cmd.arg("--json");
     cmd.arg("--skip-git-repo-check");
+    cmd.arg("--");
     cmd.arg(prompt);
 
     let output = cmd
@@ -10457,6 +10435,7 @@ fn handle_codex_review(args: Value) -> Result<Value, String> {
         cmd.args(["--commit", sha]);
     }
     if let Some(p) = prompt {
+        cmd.arg("--");
         cmd.arg(p);
     }
 
