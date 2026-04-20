@@ -1028,7 +1028,8 @@ impl Server {
                     if let Some(pkg) = cap.get(1) {
                         assertions.push(format!(
                             r"file_exists:{}\target\release\{}.exe",
-                            workspace_root(), pkg.as_str()
+                            workspace_root(),
+                            pkg.as_str()
                         ));
                     }
                 }
@@ -1576,7 +1577,7 @@ fn spawn_retry_execution(
     let wd = retry_task
         .working_dir
         .clone()
-        .unwrap_or_else(|| default_user_home());
+        .unwrap_or_else(default_user_home);
     let model = retry_task.model.clone();
 
     match retry_task.backend {
@@ -2121,7 +2122,7 @@ async fn run_cli_task(
         store
             .get(&task_id)
             .and_then(|t| t.working_dir.clone())
-            .unwrap_or_else(|| default_user_home())
+            .unwrap_or_else(default_user_home)
     };
 
     // Spawn process — .cmd files need cmd /C on Windows
@@ -4428,7 +4429,9 @@ fn handle_run_workflow(_server: &Server, args: Value) -> Result<Value, String> {
 
     // Log to inbox if requested
     if log_results {
-        let inbox_path = volumes_base_path().join("multi_ai_coordination").join("inbox.md");
+        let inbox_path = volumes_base_path()
+            .join("multi_ai_coordination")
+            .join("inbox.md");
         if let Ok(mut content) = std::fs::read_to_string(&inbox_path) {
             let entry = format!(
                 "\n### [{date}] Workflow '{name}' completed\n**Source:** Manager MCP\n**For:** All backends\n**Detail:** {done}/{total} steps completed successfully.\n",
@@ -5200,7 +5203,7 @@ fn handle_run_template(server: &Server, args: Value) -> Result<Value, String> {
                 .and_then(|v| v.as_str())
                 .map(String::from)
         })
-        .unwrap_or_else(|| workspace_root());
+        .unwrap_or_else(workspace_root);
     let submit_args = json!({ "prompt": combined, "backend": backend, "working_dir": wd });
     let result = handle_submit_task(server, submit_args)?;
 
@@ -6035,8 +6038,7 @@ struct CustomRole {
 }
 
 fn custom_roles_dir() -> std::path::PathBuf {
-    let volumes =
-        volumes_dir();
+    let volumes = volumes_dir();
     std::path::PathBuf::from(volumes)
         .join("scripts")
         .join("roles")
@@ -6160,8 +6162,7 @@ fn save_task_artifact(task: &Task) {
         return;
     }
 
-    let volumes_path =
-        volumes_dir();
+    let volumes_path = volumes_dir();
     let artifacts_dir = std::path::Path::new(&volumes_path).join("artifacts");
     if std::fs::create_dir_all(&artifacts_dir).is_err() {
         return;
@@ -6700,7 +6701,7 @@ fn handle_task_rerun(server: &Server, args: Value) -> Result<Value, String> {
             ));
         }
         Backend::Codex => {
-            let wd = original_working_dir.unwrap_or_else(|| workspace_root());
+            let wd = original_working_dir.unwrap_or_else(workspace_root);
             let args = vec![
                 "exec".into(),
                 "--json".into(),
@@ -7743,7 +7744,9 @@ async fn dash_health() -> Json<Value> {
 }
 
 async fn dash_inbox() -> Json<Value> {
-    let inbox_path = volumes_base_path().join("multi_ai_coordination").join("inbox.md");
+    let inbox_path = volumes_base_path()
+        .join("multi_ai_coordination")
+        .join("inbox.md");
     let content = match std::fs::read_to_string(inbox_path) {
         Ok(c) => c,
         Err(e) => return Json(json!({"error": format!("Cannot read inbox: {}", e)})),
@@ -7977,7 +7980,7 @@ async fn dash_post_task(
             ));
         }
         Backend::Codex => {
-            let wd = working_dir.unwrap_or_else(|| workspace_root());
+            let wd = working_dir.unwrap_or_else(workspace_root);
             let args = vec![
                 "exec".into(),
                 "--json".into(),
@@ -8137,8 +8140,7 @@ async fn dash_history() -> Json<Value> {
 }
 
 fn volumes_base_path() -> std::path::PathBuf {
-    cpc_paths::volumes_path()
-        .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\My Drive\Volumes"))
+    cpc_paths::volumes_path().unwrap_or_else(|_| std::path::PathBuf::from(r"C:\My Drive\Volumes"))
 }
 
 /// Validate that a requested path is under the Volumes base directory.
