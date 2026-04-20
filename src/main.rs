@@ -8831,10 +8831,9 @@ async fn api_register_external_task(
 }
 
 async fn start_dashboard(state: DashboardState) {
-    // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9200
-    // v1.3.4: moved default from 9100 to 9200 because ports 9100-9105 are owned by other MCP servers
-    // (local=9101, hands=9102, workflow=9103, autonomous=9104). Manager kept falling through to 9105
-    // which confused dashboard bookmarks. 9200 is clean and manager-dedicated.
+    // Port priority: CPC_DASHBOARD_PORT → CPC_MANAGER_PORT → default 9218
+    // 9218 is well above the MCP server range (local=9101, hands=9102, workflow=9103,
+    // autonomous=9104) and above the previous default (9200) which still drifted on some setups.
     let preferred: u16 = std::env::var("CPC_DASHBOARD_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -8843,7 +8842,7 @@ async fn start_dashboard(state: DashboardState) {
                 .ok()
                 .and_then(|p| p.parse().ok())
         })
-        .unwrap_or(9200);
+        .unwrap_or(9218);
 
     // Step 12.6: stall watchdog timeout (default 600s = 10 min)
     let stall_timeout_secs: u64 = std::env::var("MANAGER_STALL_TIMEOUT_SECS")
@@ -8923,6 +8922,24 @@ async fn start_dashboard(state: DashboardState) {
     DASHBOARD_PORT.store(bound_port, Ordering::SeqCst);
     DASHBOARD_RUNNING.store(true, Ordering::SeqCst);
     info!("Dashboard HTTP server on http://127.0.0.1:{}/", bound_port);
+
+    // v1.4.2: write bound port to discoverable file for UI/other-session lookup.
+    // Location: %LOCALAPPDATA%\manager-mcp\dashboard_url.txt
+    // Content: full URL on first line (e.g., "http://127.0.0.1:9218/")
+    // Best-effort — failure to write doesn't stop the dashboard.
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let url_file = std::path::PathBuf::from(local_app_data)
+            .join("manager-mcp")
+            .join("dashboard_url.txt");
+        if let Some(parent) = url_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let url = format!("http://127.0.0.1:{}/\n", bound_port);
+        match std::fs::write(&url_file, &url) {
+            Ok(_) => info!("Dashboard URL written to {:?}", url_file),
+            Err(e) => warn!("Failed to write dashboard URL file: {}", e),
+        }
+    }
 
     // Spawn live_status.json writer alongside the HTTP server
     tokio::spawn(live_status_writer(bound_port));

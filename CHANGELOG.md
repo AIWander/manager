@@ -4,6 +4,33 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-04-20
+
+### Changed
+
+- Default preferred dashboard port changed from `9200` to `9218` to move further above the
+  MCP server range (local:9101, hands:9102, workflow:9103, autonomous:9104) and avoid drift
+  observed on setups where 9200 was occasionally occupied.
+
+### Added
+
+- Dashboard URL is now written to `%LOCALAPPDATA%\manager-mcp\dashboard_url.txt` on startup.
+  Users who lose the URL can read that file directly without calling MCP tools, starting a
+  second Claude session, or searching logs.
+
+### Migration
+
+No action required. If you set `CPC_DASHBOARD_PORT=9218` as a workaround for port drift in
+earlier versions, you can remove that setting — the new default does the same thing. Any
+explicit value still takes precedence over the default.
+
+### How to find your dashboard URL
+
+Three options, in order of convenience:
+1. Read `%LOCALAPPDATA%\manager-mcp\dashboard_url.txt`
+2. Call the `manager:dashboard_status` MCP tool — returns `{port, running, url}`
+3. Call the `manager:dashboard_open` MCP tool — opens the dashboard in the default browser
+
 ## [1.4.1] - 2026-04-20
 
 ### Fixed
