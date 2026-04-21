@@ -349,25 +349,25 @@ Manager works standalone — pair it with other CPC MCP servers when you want a 
 - Pair with [hands](https://github.com/josephwander-arch/hands) when delegated tasks need browser or native-UI automation.
 - Pair with [workflow](https://github.com/josephwander-arch/workflow) when delegated tasks hit stored APIs that you've already graduated from browser to HTTP.
 
-Manager itself runs in any MCP client: Claude Desktop, Claude Code (`~/.claude/mcp.json`), OpenAI Codex CLI, Gemini CLI, or any other MCP-compatible host. A client-specific example config (`claude_desktop_config.example.json`) ships in this repo. If your client supports Anthropic skill files, you can also load `skills/manager.md` directly for skill-only (no-server) use — handy for planning or read-only review flows.
+Manager runs as a **Claude Desktop** MCP server. It is the orchestrator that delegates *to* Claude Code, Codex, and Gemini CLIs — manager should NOT be listed in those CLIs' own MCP configs. Putting manager in `~/.claude/mcp.json` or `~/.codex/config.toml` creates handle retention that prevents clean shutdown when Desktop restarts (symptom: orphaned manager processes requiring Task Manager force-kill). A client-specific example config (`claude_desktop_config.example.json`) ships in this repo. If your client supports Anthropic skill files, you can also load `skills/manager.md` directly for skill-only (no-server) use — handy for planning or read-only review flows.
 
 ### First-run tip for Claude clients
 
-If you're running manager inside Claude Desktop or Claude Code, enable **tools always loaded** in that client's tool settings before your first call. Manager exposes a wide tool surface; clients that lazy-load tools sometimes fail to discover the full set on the first invocation. Turning on always-loaded is a one-time toggle that eliminates this class of first-run friction entirely.
+If you're running manager inside Claude Desktop, enable **tools always loaded** in that client's tool settings before your first call. Manager exposes a wide tool surface; clients that lazy-load tools sometimes fail to discover the full set on the first invocation. Turning on always-loaded is a one-time toggle that eliminates this class of first-run friction entirely.
 
-### Three configs, three purposes
+### Three configs, three purposes — and why manager lives in only one
 
-If you're using manager with delegation, you'll interact with up to three different MCP config files. They serve distinct purposes and **do not cross-contaminate**: editing one does not affect the others. New users often conflate them, which causes avoidable confusion.
+If you're using manager with delegation, you'll interact with up to three different MCP config files. They serve distinct purposes and **do not cross-contaminate**: editing one does not affect the others.
 
-| File | Used by | Purpose | Typical contents |
-|------|---------|---------|-----------------|
-| `%APPDATA%\Claude\claude_desktop_config.json` | Claude Desktop app | MCP servers loaded when you open Claude Desktop | Your full interactive toolkit: manager, local, hands, workflow, voice, etc. |
-| `~/.claude/mcp.json` (global) or `./.mcp.json` (per-project) | `claude` CLI / Claude Code | MCP servers loaded when Claude Code runs — including when manager delegates to it | Typically a smaller set: tools you need mid-task. Claude Code has native Read/Write/Edit, so fewer MCP servers are needed here. |
-| `~/.codex/config.toml` | `codex` CLI | MCP servers loaded when Codex runs — including delegated tasks | Typically minimal: often just `manager` so codex can call `task_status`. Codex has its own sandboxed file I/O. |
+**Critical:** manager belongs only in **Claude Desktop's** config. Putting it in `~/.claude/mcp.json` or `~/.codex/config.toml` creates handle retention that prevents clean shutdown when Desktop restarts — the visible symptom is orphan `manager.exe` processes in Task Manager that have to be force-killed.
 
-**Why this matters:** when you delegate via `task_submit backend=claude_code`, manager shells out to the `claude` CLI, which loads its own MCP stack per `~/.claude/mcp.json`. That stack boots independently from your Claude Desktop stack — different process tree, different config file. Same logic for Codex. You can have manager listed in all three configs (common), but the rest of your toolkit should be sized to each context's real needs rather than copy-pasted across.
+| File | Used by | Purpose | Put `manager` here? |
+|------|---------|---------|---------------------|
+| `%APPDATA%\Claude\claude_desktop_config.json` | Claude Desktop app | MCP servers loaded when you open Claude Desktop | ✅ Yes — this is manager's home |
+| `~/.claude/mcp.json` (global) or `./.mcp.json` (per-project) | `claude` CLI / Claude Code | MCP servers loaded when Claude Code runs — including delegated sessions | ❌ No — manager delegates *to* this CLI, not from it |
+| `~/.codex/config.toml` | `codex` CLI | MCP servers loaded when Codex runs — including delegated sessions | ❌ No — same reason |
 
-**Keeping it lean:** for delegated-agent configs, ask "does this task actually need this tool?" before adding a server. A Claude Code session delegated to write Rust code doesn't need `voice` or `hands`; its ambient Claude Desktop parent has them but the delegated context is separate.
+**What to put in delegated-agent configs (the `.claude/mcp.json` and `.codex/config.toml` files):** tools the delegated session needs for *its own* work — e.g., `local` if you want shell/git/filesystem beyond the CLI's native tools. Not manager. The delegated session doesn't orchestrate anything; it executes the task manager handed to it.
 
 ### Bootstrap the rest of the stack via manager itself
 
@@ -392,7 +392,7 @@ Manager's orchestration surface has a few predictable failure shapes. Knowing th
 - **Long-running task silent** — status stays at `running` past your expected window. Check `task_status` first, then inspect `C:\CPC\tasks\<task_id>\transcript.jsonl` for the raw backend output.
 - **Breadcrumb orphaned by crashed session** — shows up in `breadcrumb_list` with no recent activity. Use `breadcrumb_adopt` to take it over or `breadcrumb_abort` to close it out.
 - **Dashboard stuck on stale state** — refresh the browser; dashboard is view-only and recovers on reload.
-- **Delegated task appears to "double-load" MCP servers** — expected behavior, not a bug. When `task_submit backend=claude_code` fires, the `claude` CLI boots its own MCP stack per `~/.claude/mcp.json` (separate from Claude Desktop's stack). You'll see two processes of each shared server in Task Manager — one for the desktop client, one for the delegated session — and they coexist fine. To reduce boot time on delegation, keep `~/.claude/mcp.json` lean (often just `manager` is enough — Claude Code has native file I/O). Same principle applies to `~/.codex/config.toml` when delegating to Codex.
+- **Orphan manager processes surviving Desktop restart** — if you have to force-kill `manager.exe` in Task Manager after quitting Claude Desktop, check whether manager is listed in `~/.claude/mcp.json` or `~/.codex/config.toml`. If yes, remove it from those configs and restart. Manager belongs only in Claude Desktop's config. When a delegated CLI holds an MCP handle to one of its own dependencies, that dependency cannot exit cleanly on restart, producing orphan processes that accumulate until force-killed.
 
 ## Contributing
 
