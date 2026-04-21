@@ -65,6 +65,20 @@ per-task token budget; in practice, the threshold tends to sit somewhere in
 the 30–40-line range, which is the rule of thumb you'll see repeated in CPC
 skill files.
 
+### The meta-agent pattern
+
+What you get when manager is wired up isn't just a router — it's a concrete **meta-agent** architecture. Your primary chat (Claude Desktop, Claude Code, or any MCP client) becomes the orchestrator: it holds the goal-level context, decides what to delegate, when to parallelize, and how to synthesize results. Coding agents become disposable workers with their own sandboxes and token budgets. Manager sits between them as durable infrastructure — it persists task state to disk, tails child process logs, and reconnects surviving subprocesses across restarts (new in v1.4.3).
+
+Practical consequences:
+
+- Your conversation window is freed from implementation detail. You read summaries, not code diffs.
+- Failed delegations don't cost orchestration context. Retry with `task_retry` and keep going.
+- Long-running work survives client restarts. The meta-agent can step away and come back.
+- Parallel subtasks become trivial via `task_run_parallel` — fan out, collect, synthesize.
+- Multiple coding backends coexist. Pick Claude Code for multi-step toolchains, Codex for one-shot scripts, Gemini for large-context Q&A, all from one orchestration layer.
+
+The pattern works equally well with Anthropic Cowork for scheduled/autonomous operation — Cowork fills the gap where chat-based meta-agents end (ephemeral context, no scheduling). Use chat for interactive orchestration; use Cowork for background jobs that need to run while you're not watching.
+
 ### Backends
 
 | Backend | Status | Best For |
@@ -89,7 +103,7 @@ skill files.
 
 ### Windows x64
 
-1. Download `manager-v1.4.2-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.3-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -107,7 +121,7 @@ skill files.
 
 ### Windows ARM64
 
-1. Download `manager-v1.4.2-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.3-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -335,6 +349,20 @@ Manager itself runs in any MCP client: Claude Desktop, Claude Code (`~/.claude/m
 
 If you're running manager inside Claude Desktop or Claude Code, enable **tools always loaded** in that client's tool settings before your first call. Manager exposes a wide tool surface; clients that lazy-load tools sometimes fail to discover the full set on the first invocation. Turning on always-loaded is a one-time toggle that eliminates this class of first-run friction entirely.
 
+### Three configs, three purposes
+
+If you're using manager with delegation, you'll interact with up to three different MCP config files. They serve distinct purposes and **do not cross-contaminate**: editing one does not affect the others. New users often conflate them, which causes avoidable confusion.
+
+| File | Used by | Purpose | Typical contents |
+|------|---------|---------|-----------------|
+| `%APPDATA%\Claude\claude_desktop_config.json` | Claude Desktop app | MCP servers loaded when you open Claude Desktop | Your full interactive toolkit: manager, local, hands, workflow, voice, etc. |
+| `~/.claude/mcp.json` (global) or `./.mcp.json` (per-project) | `claude` CLI / Claude Code | MCP servers loaded when Claude Code runs — including when manager delegates to it | Typically a smaller set: tools you need mid-task. Claude Code has native Read/Write/Edit, so fewer MCP servers are needed here. |
+| `~/.codex/config.toml` | `codex` CLI | MCP servers loaded when Codex runs — including delegated tasks | Typically minimal: often just `manager` so codex can call `task_status`. Codex has its own sandboxed file I/O. |
+
+**Why this matters:** when you delegate via `task_submit backend=claude_code`, manager shells out to the `claude` CLI, which loads its own MCP stack per `~/.claude/mcp.json`. That stack boots independently from your Claude Desktop stack — different process tree, different config file. Same logic for Codex. You can have manager listed in all three configs (common), but the rest of your toolkit should be sized to each context's real needs rather than copy-pasted across.
+
+**Keeping it lean:** for delegated-agent configs, ask "does this task actually need this tool?" before adding a server. A Claude Code session delegated to write Rust code doesn't need `voice` or `hands`; its ambient Claude Desktop parent has them but the delegated context is separate.
+
 ### Bootstrap the rest of the stack via manager itself
 
 Manager's own `task_submit` is a clean way to install its sibling servers. Once manager is running, delegate a Claude Code task:
@@ -358,6 +386,7 @@ Manager's orchestration surface has a few predictable failure shapes. Knowing th
 - **Long-running task silent** — status stays at `running` past your expected window. Check `task_status` first, then inspect `C:\CPC\tasks\<task_id>\transcript.jsonl` for the raw backend output.
 - **Breadcrumb orphaned by crashed session** — shows up in `breadcrumb_list` with no recent activity. Use `breadcrumb_adopt` to take it over or `breadcrumb_abort` to close it out.
 - **Dashboard stuck on stale state** — refresh the browser; dashboard is view-only and recovers on reload.
+- **Delegated task appears to "double-load" MCP servers** — expected behavior, not a bug. When `task_submit backend=claude_code` fires, the `claude` CLI boots its own MCP stack per `~/.claude/mcp.json` (separate from Claude Desktop's stack). You'll see two processes of each shared server in Task Manager — one for the desktop client, one for the delegated session — and they coexist fine. To reduce boot time on delegation, keep `~/.claude/mcp.json` lean (often just `manager` is enough — Claude Code has native file I/O). Same principle applies to `~/.codex/config.toml` when delegating to Codex.
 
 ## Contributing
 
