@@ -1,6 +1,6 @@
 # Manager MCP Server
 
-[![CI](https://github.com/josephwander-arch/manager/actions/workflows/ci.yml/badge.svg)](https://github.com/josephwander-arch/manager/actions/workflows/ci.yml)
+[![CI](https://github.com/AIWander/manager/actions/workflows/ci.yml/badge.svg)](https://github.com/AIWander/manager/actions/workflows/ci.yml)
 
 Multi-vendor AI orchestration from inside any MCP client. Manager routes
 coding, reasoning, and toolchain tasks to **Claude Code**, **OpenAI Codex**,
@@ -11,7 +11,7 @@ One MCP server. Four backends. Server-side blocking. Durable coordination.
 
 **48 MCP tools** across task orchestration, session management, loafs, templates, analytics, dashboard, and multi-backend coordination.
 
-**Part of [CPC](https://github.com/josephwander-arch) (Copy Paste Compute)** — a multi-agent AI orchestration platform. Related repos: [local](https://github.com/josephwander-arch/local) · [hands](https://github.com/josephwander-arch/hands) · [workflow](https://github.com/josephwander-arch/workflow) · [cpc-paths](https://github.com/josephwander-arch/cpc-paths) · [cpc-breadcrumbs](https://github.com/josephwander-arch/cpc-breadcrumbs)
+**Part of [CPC](https://github.com/AIWander) (Copy Paste Compute)** — a multi-agent AI orchestration platform. Related repos: [local](https://github.com/AIWander/local) · [hands](https://github.com/AIWander/hands) · [workflow](https://github.com/AIWander/workflow) · [cpc-paths](https://github.com/AIWander/cpc-paths) · [cpc-breadcrumbs](https://github.com/AIWander/cpc-breadcrumbs)
 
 ---
 
@@ -33,7 +33,7 @@ What CPC is not: it is not a replacement for Claude Desktop's native tooling, no
 
 ### Previous: v1.4.1 — Path migration + dashboard polish
 
-See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.4.1), or browse the [Releases page](https://github.com/josephwander-arch/manager/releases) for per-version binaries and notes.
+See [CHANGELOG.md](CHANGELOG.md) for the full history (v1.0.0 through v1.4.1), or browse the [Releases page](https://github.com/AIWander/manager/releases) for per-version binaries and notes.
 
 ---
 
@@ -103,7 +103,7 @@ The pattern works equally well with Anthropic Cowork for scheduled/autonomous op
 
 ### Windows x64
 
-1. Download `manager-v1.4.3-x64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.3-x64.exe` from the [latest release](https://github.com/AIWander/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -121,7 +121,7 @@ The pattern works equally well with Anthropic Cowork for scheduled/autonomous op
 
 ### Windows ARM64
 
-1. Download `manager-v1.4.3-aarch64.exe` from the [latest release](https://github.com/josephwander-arch/manager/releases/latest).
+1. Download `manager-v1.4.3-aarch64.exe` from the [latest release](https://github.com/AIWander/manager/releases/latest).
 2. Rename to `manager.exe` and place in `%LOCALAPPDATA%\CPC\servers\`.
 3. Add to your `claude_desktop_config.json`:
    ```json
@@ -150,7 +150,7 @@ For full per-machine setup (paths, backend CLI auth, toast notifications), see [
 ### Build from Source
 
 ```bash
-git clone https://github.com/josephwander-arch/manager.git
+git clone https://github.com/AIWander/manager.git
 cd manager
 cargo build --release
 ```
@@ -339,9 +339,9 @@ Each CLI must be authenticated in a real interactive terminal *before* manager's
 
 Manager works standalone — pair it with other CPC MCP servers when you want a larger toolkit. Manager handles delegation and coordination; the other servers handle the tools you're delegating over.
 
-- Pair with [local](https://github.com/josephwander-arch/local) for filesystem, shell, and persistent-session tools on Windows.
-- Pair with [hands](https://github.com/josephwander-arch/hands) when delegated tasks need browser or native-UI automation.
-- Pair with [workflow](https://github.com/josephwander-arch/workflow) when delegated tasks hit stored APIs that you've already graduated from browser to HTTP.
+- Pair with [local](https://github.com/AIWander/local) for filesystem, shell, and persistent-session tools on Windows.
+- Pair with [hands](https://github.com/AIWander/hands) when delegated tasks need browser or native-UI automation.
+- Pair with [workflow](https://github.com/AIWander/workflow) when delegated tasks hit stored APIs that you've already graduated from browser to HTTP.
 
 Manager runs as a **Claude Desktop** MCP server. It is the orchestrator that delegates *to* Claude Code, Codex, and Gemini CLIs — manager should NOT be listed in those CLIs' own MCP configs. Putting manager in `~/.claude/mcp.json` or `~/.codex/config.toml` creates handle retention that prevents clean shutdown when Desktop restarts (symptom: orphaned manager processes requiring Task Manager force-kill). A client-specific example config (`claude_desktop_config.example.json`) ships in this repo. If your client supports Anthropic skill files, you can also load `skills/manager.md` directly for skill-only (no-server) use — handy for planning or read-only review flows.
 
@@ -367,7 +367,7 @@ If you're using manager with delegation, you'll interact with up to three differ
 
 Manager's own `task_submit` is a clean way to install its sibling servers. Once manager is running, delegate a Claude Code task:
 
-> `task_submit with backend claude_code: install hands, local, and workflow from github.com/josephwander-arch/, register them in Claude Desktop config, and verify each one started cleanly.`
+> `task_submit with backend claude_code: install hands, local, and workflow from github.com/AIWander/, register them in Claude Desktop config, and verify each one started cleanly.`
 
 The delegated session downloads each binary, places it, edits the config, and verifies startup in its own sandbox. You monitor via `task_status` and collect the result when it reports `health: done`. Manual installs work just as well — use whichever is faster for your setup.
 
@@ -401,5 +401,5 @@ Apache License 2.0. See [LICENSE](LICENSE).
 ## Contact
 
 Joseph Wander
-- GitHub: [github.com/josephwander-arch](https://github.com/josephwander-arch/)
+- GitHub: [github.com/AIWander](https://github.com/AIWander/)
 - Email: josephwander@gmail.com

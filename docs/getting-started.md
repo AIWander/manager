@@ -51,7 +51,7 @@ Manager sits between your MCP client (Claude Desktop, Claude Code, or any model 
 Manager is a single Rust binary with no runtime dependencies beyond the AI backends themselves.
 
 ```bash
-git clone https://github.com/josephwander-arch/manager.git
+git clone https://github.com/AIWander/manager.git
 cd manager
 cargo build --release
 ```
@@ -60,7 +60,7 @@ The compiled binary lands at `target/release/manager.exe` (Windows) or `target/r
 
 ### Pre-built Binaries
 
-Download the latest Windows binaries from the [latest release](https://github.com/josephwander-arch/manager/releases/latest):
+Download the latest Windows binaries from the [latest release](https://github.com/AIWander/manager/releases/latest):
 - `manager-v1.3.8-x64.exe` — Windows x64
 - `manager-v1.3.8-aarch64.exe` — Windows ARM64
 
