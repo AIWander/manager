@@ -4,6 +4,10 @@ All notable changes to the Manager MCP Server are documented here.
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-04-27
+
+- chore: GitHub org renamed from josephwander-arch to AIWander. Dashboard, docs, and Cargo metadata updated.
+
 ## [1.4.3] - 2026-04-20
 
 ### Added

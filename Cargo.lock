@@ -187,7 +187,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "cpc-paths"
 version = "0.1.1"
-source = "git+https://github.com/josephwander-arch/cpc-paths?tag=v0.1.1#64599715ec2a21bd3a02f2deb7b6b848d7a4a477"
+source = "git+https://github.com/AIWander/cpc-paths?tag=v0.1.1#64599715ec2a21bd3a02f2deb7b6b848d7a4a477"
 dependencies = [
  "anyhow",
  "chrono",
@@ -795,7 +795,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "manager-mcp"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "axum",
  "chrono",
