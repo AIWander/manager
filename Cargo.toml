@@ -24,7 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
-sysinfo = "0.32"
+sysinfo = "0.38"
 regex = "1"
 rand = "0.8"
 serde_yaml = "0.9"
