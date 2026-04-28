@@ -50,7 +50,7 @@ jobs:
           $version = "${{ github.ref_name }}"
           Copy-Item "target/${{ matrix.target }}/release/$bin.exe" "$bin-$version-${{ matrix.suffix }}.exe"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: manager-${{ matrix.suffix }}
           path: manager-*-${{ matrix.suffix }}.exe
