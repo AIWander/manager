@@ -12,3 +12,8 @@ Thumbs.db
 *.pre_merge_*
 *.pre_dashfix_*
 *.pre_phaseD_*
+
+# Codex and cross-compile build artifacts
+codex_target_*/
+target_v143*/
+target_v143*/
